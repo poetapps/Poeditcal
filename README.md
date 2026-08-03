@@ -41,11 +41,9 @@ The local bundle is ad-hoc signed. Public distribution will additionally require
 
 ```sh
 swift test --disable-sandbox
-POET_RUN_TRANSCRIPTION_TEST=1 POET_TEST_RECORDING="$PWD/test_42.m4a" swift test --disable-sandbox --filter LocalTranscriptionIntegrationTests
-POET_RUN_DENOISE_FIXTURE=1 swift test --disable-sandbox --filter DenoiseIntegrationTests
 ```
 
-The regular suite covers retake suggestions, edit planning, synchronized subtitle remapping, adaptive voice processing, subtle breath attenuation, and a complete package export using `short_Test Recording.m4a`. The opt-in transcription test exercises the real cached Parakeet model and validates intentional repeated takes in `test_42.m4a`.
+The test suite covers retake suggestions, edit planning, synchronized subtitle remapping, adaptive voice processing, subtle breath attenuation, audio rendering, and project persistence. Tests that require local audio fixtures or downloaded models are skipped automatically when those resources are unavailable.
 
 ## Architecture
 
