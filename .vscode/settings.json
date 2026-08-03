@@ -1,0 +1,9 @@
+{
+    "git.autoRepositoryDetection": "openEditors",
+    "git.ignoredRepositories": [
+        ".build/checkouts/FluidAudio",
+        ".build/index-build/checkouts/FluidAudio",
+        ".build/XcodeDerivedData/SourcePackages/checkouts/argmax-oss-swift",
+        ".build/XcodeDerivedData/SourcePackages/checkouts/swift-argument-parser"
+    ]
+}

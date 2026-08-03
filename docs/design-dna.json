@@ -1,0 +1,147 @@
+{
+  "meta": {
+    "name": "Poet Audio — Midnight Editorial",
+    "description": "A quiet, premium dark interface that combines editorial warmth with native macOS clarity.",
+    "source_references": [
+      "Screenshot 2026-08-02 at 12.45.36 AM.png",
+      "Untitled_Artwork-1.png through Untitled_Artwork-5.png"
+    ],
+    "created_at": "2026-08-02"
+  },
+  "design_system": {
+    "color": {
+      "palette_type": "analogous",
+      "primary": { "hex": "#8EA786", "role": "primary actions, active steps, positive status" },
+      "secondary": { "hex": "#F2EDE1", "role": "editorial headings and primary text" },
+      "accent": { "hex": "#D98B35", "role": "removed audio, cautions, processing emphasis" },
+      "neutral": {
+        "scale": ["#F8F5EC", "#C5C0B5", "#97958D", "#5F625D", "#292C29", "#1B1E1B", "#111311", "#080A09"],
+        "usage": "warm light text over near-black backgrounds with subtle layered surfaces"
+      },
+      "semantic": { "success": "#8EA786", "warning": "#D98B35", "error": "#D96E66", "info": "#88AAB2" },
+      "surface": { "background": "#080A09", "card": "#111311", "elevated": "#1B1E1B" },
+      "contrast_strategy": "high text contrast with low-contrast nested surfaces and sparing chromatic accents"
+    },
+    "typography": {
+      "type_scale": {
+        "display": { "size": "48px", "weight": "700", "line_height": "1.02", "tracking": "-0.035em" },
+        "heading_1": { "size": "36px", "weight": "700", "line_height": "1.08", "tracking": "-0.025em" },
+        "heading_2": { "size": "26px", "weight": "650", "line_height": "1.16", "tracking": "-0.015em" },
+        "heading_3": { "size": "18px", "weight": "600", "line_height": "1.3", "tracking": "-0.005em" },
+        "body": { "size": "16px", "weight": "450", "line_height": "1.55", "tracking": "0em" },
+        "body_small": { "size": "14px", "weight": "450", "line_height": "1.45", "tracking": "0em" },
+        "caption": { "size": "12px", "weight": "500", "line_height": "1.35", "tracking": "0.01em" },
+        "overline": { "size": "11px", "weight": "650", "line_height": "1.2", "tracking": "0.12em" }
+      },
+      "font_families": { "heading": "New York, Georgia, serif", "body": "SF Pro, system-ui, sans-serif", "mono": "SF Mono, ui-monospace" },
+      "font_style_notes": "high-contrast editorial serif for emotional hierarchy, restrained humanist system sans for utility"
+    },
+    "spacing": {
+      "base_unit": "4px",
+      "scale": ["4px", "8px", "12px", "16px", "20px", "24px", "32px", "40px", "48px", "64px"],
+      "content_density": "comfortable",
+      "section_rhythm": "large calm section gaps with compact relationships inside cards"
+    },
+    "layout": {
+      "grid_system": "12-column adaptive desktop grid",
+      "max_content_width": "1280px",
+      "columns": "single-column onboarding; 3/6/3 transcript workspace; 4-column option grids",
+      "gutter": "20px",
+      "breakpoints": ["760px", "980px", "1280px"],
+      "alignment_tendency": "left-aligned content within centered, generously padded frames"
+    },
+    "shape": {
+      "border_radius": { "small": "10px", "medium": "16px", "large": "26px", "pill": "999px" },
+      "border_usage": "single-pixel low-contrast borders primarily for selection and drop targets",
+      "divider_style": "one-pixel warm-black dividers at roughly 60 percent width contrast"
+    },
+    "elevation": {
+      "shadow_style": "soft ambient black shadows with no hard edge",
+      "levels": { "low": "0 8px 24px rgba(0,0,0,.16)", "medium": "0 18px 50px rgba(0,0,0,.24)", "high": "0 28px 80px rgba(0,0,0,.34)" },
+      "depth_cues": "surface luminance and thin borders do more work than shadows"
+    },
+    "iconography": { "style": "rounded outline", "stroke_weight": "1.7px", "size_scale": ["14px", "18px", "22px", "30px"], "preferred_set": "SF Symbols" },
+    "motion": {
+      "easing": "cubic-bezier(0.22, 1, 0.36, 1)",
+      "duration_scale": { "micro": "120ms", "normal": "240ms", "macro": "420ms" },
+      "entrance_pattern": "short fade with 6px upward settling",
+      "exit_pattern": "fast opacity fade",
+      "philosophy": "quiet, functional motion that confirms state without spectacle"
+    },
+    "components": {
+      "button_style": "cream-on-sage primary pills, muted surface secondary pills, generous 14px horizontal padding",
+      "input_style": "large dark fields with warm placeholder text and sage focus ring",
+      "card_style": "near-black or charcoal cards with 20–28px radius and restrained one-pixel borders",
+      "navigation_pattern": "three-step horizontal progress rail integrated into the window header",
+      "modal_style": "centered elevated card with dim backdrop and concise choices",
+      "list_style": "roomy rows separated by subtle dark dividers",
+      "component_notes": "selected controls use filled charcoal surfaces; removed transcript tokens use amber strike-through rather than destructive red"
+    }
+  },
+  "design_style": {
+    "aesthetic": {
+      "mood": "calm, intimate, intelligent, reassuring",
+      "visual_metaphor": "a quiet nighttime writing studio",
+      "era_influence": "contemporary editorial mobile products translated to macOS",
+      "genre": "premium creative productivity",
+      "personality_traits": ["considered", "warm", "private", "capable", "unhurried"],
+      "adjectives": ["editorial", "dark", "soft", "restrained", "tactile"]
+    },
+    "visual_language": {
+      "complexity": "low",
+      "ornamentation": "minimal",
+      "whitespace_usage": "generous and structural",
+      "visual_weight_distribution": "strong editorial headline balanced by broad low-contrast cards",
+      "focal_strategy": "one dominant action or decision per screen",
+      "contrast_level": "high for type, subtle for chrome",
+      "texture_usage": "none; depth comes from layered warm-black surfaces"
+    },
+    "composition": {
+      "hierarchy_method": "serif scale, color restraint, then spatial grouping",
+      "balance_type": "mostly symmetric onboarding, asymmetric utility workspace",
+      "flow_direction": "top-to-bottom with a persistent left-to-right step sequence",
+      "grouping_strategy": "large rounded cards and labeled sections",
+      "negative_space_role": "reduces anxiety and makes processing feel deliberate"
+    },
+    "imagery": {
+      "photo_treatment": "not used",
+      "illustration_style": "simple SF Symbol line illustrations in circular wells",
+      "graphic_elements": "waveforms, progress tracks, status dots, and fine dividers",
+      "pattern_usage": "none",
+      "image_shape": "rounded cards and circular icon wells"
+    },
+    "interaction_feel": {
+      "feedback_style": "immediate color and surface-state changes with plain-language confirmation",
+      "hover_behavior": "slight surface lift or border brightening",
+      "transition_personality": "soft and assured",
+      "loading_style": "determinate progress with rotating useful audio guidance",
+      "microinteraction_density": "low"
+    },
+    "brand_voice_in_ui": {
+      "tone": "clear, warm, gently expert",
+      "formality": "conversational professional",
+      "cta_style": "short verbs such as Choose audio, Review edit, Polish, Export",
+      "empty_state_approach": "inviting and instructional without technical jargon",
+      "error_tone": "specific, calm, and recoverable"
+    }
+  },
+  "visual_effects": {
+    "overview": { "effect_intensity": "low", "performance_tier": "lightweight", "fallback_strategy": "static state changes with all information preserved", "primary_technology": "native SwiftUI animation" },
+    "background_effects": { "type": "none", "description": "flat near-black canvas", "technology": "native fill", "params": { "color_palette": ["#080A09"], "speed": "0", "density": "0", "opacity": "1", "blend_mode": "normal" } },
+    "particle_systems": { "enabled": false, "type": "none", "description": "No particles", "technology": "none", "params": { "count": 0, "shape": "none", "size_range": "0", "movement_pattern": "none", "color_behavior": "none", "interaction": "none", "spawn_area": "none" } },
+    "3d_elements": { "enabled": false, "type": "none", "description": "No 3D elements", "technology": "none", "params": { "renderer": "none", "lighting": "none", "camera": "none", "materials": "none", "geometry": "none", "post_processing": "none", "interaction_model": "none" } },
+    "shader_effects": { "enabled": false, "type": "none", "description": "No shaders", "technology": "none", "params": { "uniforms": "none", "vertex_manipulation": "none", "fragment_output": "none", "noise_type": "none", "distortion": "none" } },
+    "scroll_effects": {
+      "parallax": { "enabled": false, "layers": 0, "depth_range": "0", "speed_curve": "none" },
+      "scroll_triggered_animations": { "enabled": false, "trigger_points": "none", "animation_type": "none", "scrub_behavior": "none" },
+      "scroll_morphing": { "enabled": false, "description": "No scroll morphing" }
+    },
+    "text_effects": { "type": "active-word-highlight", "description": "Transcript words softly illuminate during playback", "technology": "SwiftUI state animation", "params": { "split_strategy": "word", "animation_per_unit": "color and background", "stagger": "0ms", "effect_style": "soft sage capsule" } },
+    "cursor_effects": { "enabled": false, "type": "system", "description": "Standard macOS pointer", "params": { "shape": "system", "size": "system", "blend_mode": "normal", "trail": "none", "interaction_zone": "controls" } },
+    "image_effects": { "type": "none", "description": "No image treatment", "technology": "none", "params": { "filter_pipeline": "none", "hover_transform": "none", "reveal_animation": "none", "distortion_type": "none" } },
+    "glassmorphism_neumorphism": { "enabled": false, "style": "none", "params": { "blur_radius": "0", "transparency": "0", "border_treatment": "subtle opaque border", "shadow_type": "ambient", "light_source_angle": "none" } },
+    "canvas_drawings": { "enabled": false, "type": "none", "description": "Waveform uses native SwiftUI shapes", "technology": "SwiftUI Canvas only if needed", "params": { "draw_method": "path", "animation_loop": "none", "color_scheme": "sage on charcoal", "responsiveness": "container-aware", "interaction": "scrub" } },
+    "svg_animations": { "enabled": false, "type": "none", "description": "SF Symbols replace SVG assets", "params": { "animation_method": "none", "path_morphing": "none", "stroke_animation": "none", "filter_effects": "none" } },
+    "composite_notes": "The reference relies on typography, nested dark surfaces, pill controls, and tiny color accents rather than spectacle. Preserve that restraint in the Mac translation."
+  }
+}

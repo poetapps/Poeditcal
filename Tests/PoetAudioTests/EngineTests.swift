@@ -1,0 +1,546 @@
+import AVFoundation
+import XCTest
+@testable import PoetAudio
+
+final class EngineTests: XCTestCase {
+    func testPoetProjectRoundTripKeepsAudioAndEditDecisions() throws {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PoetProjectTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+
+        let source = folder.appendingPathComponent("take.wav")
+        try makeTone(at: source, duration: 0.2)
+        let snapshot = PoetProjectSnapshot(
+            projectName: "First draft",
+            sourceAudioFile: "Source Audio.wav",
+            sourceDisplayName: "take.wav",
+            phase: .edit,
+            editingMode: .autopilot,
+            autoEditConfiguration: AutoEditConfiguration(),
+            pacing: .natural,
+            duration: 0.2,
+            words: [word("Keep", 0, 0.1), word("cut", 0.1, 0.2, removed: true)],
+            polishSelections: Set(PolishOption.allCases),
+            polishIntensities: [
+                .noise: .strong,
+                .eq: .light,
+                .deEss: .balanced,
+                .compression: .light,
+                .breathControl: .maximum
+            ],
+            usePolish: true,
+            loudnessPreset: .podcast,
+            exportAudio: true,
+            exportTXT: true,
+            exportSRT: false,
+            exportVTT: false
+        )
+
+        let package = try PoetProjectStore.save(
+            snapshot: snapshot,
+            sourceAudioURL: source,
+            to: folder.appendingPathComponent("First draft.poe")
+        )
+        let loaded = try PoetProjectStore.load(from: package)
+
+        XCTAssertEqual(loaded.snapshot, snapshot)
+        XCTAssertEqual(loaded.snapshot.polishIntensities?[.compression], .light)
+        XCTAssertEqual(loaded.snapshot.polishIntensities?[.breathControl], .maximum)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: loaded.audioURL.path))
+        XCTAssertEqual(loaded.audioURL.lastPathComponent, "Source Audio.wav")
+
+        var revised = snapshot
+        revised.projectName = "Second draft"
+        _ = try PoetProjectStore.save(snapshot: revised, sourceAudioURL: loaded.audioURL, to: package)
+        XCTAssertEqual(try PoetProjectStore.load(from: package).snapshot.projectName, "Second draft")
+    }
+
+    func testLaunchArgumentsIgnoreNonAudioValuesLikeYES() {
+        XCTAssertNil(PoetAppDelegate.launchAudioURL(
+            arguments: ["PoetAudio", "YES"],
+            fileExists: { _ in true }
+        ))
+
+        let audio = PoetAppDelegate.launchAudioURL(
+            arguments: ["PoetAudio", "-NSDocumentRevisionsDebugMode", "YES", "/tmp/take.m4a"],
+            fileExists: { $0 == "/tmp/take.m4a" }
+        )
+        XCTAssertEqual(audio?.path, "/tmp/take.m4a")
+    }
+
+    func testAutoEditFindsEarlierRepeatedTakeAndFiller() {
+        let text = "Today we start. Um I think the best tools disappear. Sorry try again. The best tools disappear quickly."
+        let tokens = text.split(separator: " ").enumerated().map { index, word in
+            TranscribedToken(text: String(word), startTime: Double(index) * 0.3, duration: 0.22, confidence: 0.9)
+        }
+
+        let suggestions = AutoEditAnalyzer.suggestions(for: tokens)
+        let removed = Set(suggestions.flatMap { Array($0.range) })
+        let normalized = tokens.map { $0.text.lowercased().trimmingCharacters(in: .punctuationCharacters) }
+        let filler = normalized.firstIndex(of: "um")!
+        let firstTake = normalized.firstIndex(of: "think")!
+        let secondTake = normalized.lastIndex(of: "the")!
+
+        XCTAssertTrue(removed.contains(filler))
+        XCTAssertTrue(removed.contains(firstTake))
+        XCTAssertFalse(removed.contains(secondTake))
+    }
+
+    func testBalancedEditProtectsOpeningAndFindsConversationalFillers() {
+        let text = "So I just wanted to test this. I mean I just wanted to see if this works. You know yeah yeah"
+        let tokens = text.split(separator: " ").enumerated().map { index, word in
+            TranscribedToken(text: String(word), startTime: Double(index) * 0.28, duration: 0.2, confidence: 0.9)
+        }
+        let suggestions = AutoEditAnalyzer.suggestions(for: tokens)
+        let removed = Set(suggestions.flatMap { Array($0.range) })
+        let words = tokens.map { $0.text.lowercased().trimmingCharacters(in: .punctuationCharacters) }
+
+        XCTAssertFalse(removed.contains(0), "A partial repeated opening should stay protected.")
+        XCTAssertTrue(removed.contains(words.firstIndex(of: "mean")!))
+        XCTAssertTrue(removed.contains(words.firstIndex(of: "you")!))
+        XCTAssertTrue(removed.contains(words.lastIndex(of: "yeah")!))
+    }
+
+    func testAutoEditCategoryTogglesAreHonored() {
+        let text = "Um keep this. Sorry redo this. Keep this sentence now. Keep this sentence now."
+        let tokens = text.split(separator: " ").enumerated().map { index, word in
+            TranscribedToken(text: String(word), startTime: Double(index) * 0.3, duration: 0.22, confidence: 0.9)
+        }
+        let configuration = AutoEditConfiguration(
+            intensity: .thorough,
+            removeFillers: false,
+            detectRetakes: false,
+            detectRestarts: true,
+            protectOpening: false
+        )
+        let suggestions = AutoEditAnalyzer.suggestions(for: tokens, configuration: configuration)
+
+        XCTAssertFalse(suggestions.contains { $0.reason == .filler })
+        XCTAssertFalse(suggestions.contains { $0.reason == .earlierTake })
+        XCTAssertTrue(suggestions.contains { $0.reason == .restart })
+    }
+
+    func testEditPlannerRemovesWordsAndShortensLongPauses() {
+        let words = [
+            word("Keep", 0.2, 0.5),
+            word("remove", 0.55, 0.9, removed: true),
+            word("this", 0.92, 1.2, removed: true),
+            word("Then", 3.8, 4.1),
+            word("finish", 4.2, 4.6)
+        ]
+        let kept = AudioEditPlanner.keptRanges(words: words, duration: 5, pacing: .natural)
+        let keptDuration = kept.reduce(0) { $0 + ($1.end - $1.start) }
+
+        XCTAssertGreaterThan(kept.count, 1)
+        XCTAssertLessThan(keptDuration, 3.8)
+        XCTAssertFalse(kept.contains { $0.start < 0.7 && $0.end > 1.0 })
+    }
+
+    func testEditPlannerCapsWordEndToNextWordStartAtExactMaximum() {
+        let words = [
+            word("First", 0.2, 0.5),
+            word("next", 0.75, 1.0)
+        ]
+
+        let kept = AudioEditPlanner.keptRanges(words: words, duration: 1.2, maximumPause: 0.2)
+        let editedFirstEnd = AudioEditPlanner.editedTime(for: words[0].endTime, keptRanges: kept)
+        let editedNextStart = AudioEditPlanner.editedTime(for: words[1].startTime, keptRanges: kept)
+
+        XCTAssertEqual(editedNextStart - editedFirstEnd, 0.2, accuracy: 0.001)
+    }
+
+    func testEditPlannerCapsPauseAcrossRemovedWordsUsingRetainedWordBoundaries() {
+        let words = [
+            word("Keep", 0.2, 0.5),
+            word("discard", 0.65, 1.0, removed: true),
+            word("Then", 1.8, 2.1)
+        ]
+
+        let kept = AudioEditPlanner.keptRanges(words: words, duration: 2.4, maximumPause: 0.2)
+        let editedKeepEnd = AudioEditPlanner.editedTime(for: words[0].endTime, keptRanges: kept)
+        let editedThenStart = AudioEditPlanner.editedTime(for: words[2].startTime, keptRanges: kept)
+
+        XCTAssertEqual(editedThenStart - editedKeepEnd, 0.2, accuracy: 0.001)
+        XCTAssertFalse(kept.contains { $0.start < 0.8 && $0.end > 0.9 })
+    }
+
+    func testSpeechTimingRefinerRemovesDecoderBlankFramesFromWordEnd() {
+        let sampleRate = 16_000.0
+        var samples = [Float](repeating: 0.002, count: Int(sampleRate * 1.4))
+        addSine(to: &samples, sampleRate: sampleRate, range: 0.1..<0.38, amplitude: 0.2)
+        addSine(to: &samples, sampleRate: sampleRate, range: 1.0..<1.3, amplitude: 0.2)
+        let tokens = [
+            TranscribedToken(text: "First", startTime: 0.1, duration: 0.9, confidence: 0.9),
+            TranscribedToken(text: "Next", startTime: 1.0, duration: 0.3, confidence: 0.9)
+        ]
+
+        let refined = SpeechTimingRefiner.refine(tokens, samples: samples, sampleRate: sampleRate)
+        let refinedEnd = refined[0].startTime + refined[0].duration
+
+        XCTAssertEqual(refinedEnd, 0.42, accuracy: 0.04)
+        XCTAssertGreaterThan(tokens[0].duration - refined[0].duration, 0.5)
+    }
+
+    func testSpeechTimingRefinerDoesNotTreatBreathLikeNoiseAsWordTail() {
+        let sampleRate = 16_000.0
+        var samples = [Float](repeating: 0.002, count: Int(sampleRate * 1.4))
+        addSine(to: &samples, sampleRate: sampleRate, range: 0.1..<0.38, amplitude: 0.2)
+        addAlternatingNoise(to: &samples, sampleRate: sampleRate, range: 0.58..<0.82, amplitude: 0.025)
+        addSine(to: &samples, sampleRate: sampleRate, range: 1.0..<1.3, amplitude: 0.2)
+        let tokens = [
+            TranscribedToken(text: "First", startTime: 0.1, duration: 0.9, confidence: 0.9),
+            TranscribedToken(text: "Next", startTime: 1.0, duration: 0.3, confidence: 0.9)
+        ]
+
+        let refined = SpeechTimingRefiner.refine(tokens, samples: samples, sampleRate: sampleRate)
+
+        XCTAssertLessThan(refined[0].startTime + refined[0].duration, 0.5)
+    }
+
+    func testEditPlannerTrimsRecordingEdgesFromTranscriptWithSafetyBuffer() {
+        let words = [
+            word("First", 1.0, 1.4),
+            word("last", 3.0, 3.5)
+        ]
+
+        let kept = AudioEditPlanner.keptRanges(words: words, duration: 5, pacing: .natural)
+
+        XCTAssertFalse(kept.isEmpty)
+        XCTAssertEqual(kept[0].start, 0.85, accuracy: 0.001)
+        XCTAssertEqual(kept[kept.count - 1].end, 3.65, accuracy: 0.001)
+    }
+
+    func testEditPlannerUsesFirstRetainedWordForLeadingTrim() {
+        let words = [
+            word("Discard", 0.5, 1.1, removed: true),
+            word("Begin", 2.0, 2.5),
+            word("here", 2.6, 3.0)
+        ]
+
+        let kept = AudioEditPlanner.keptRanges(words: words, duration: 4, pacing: .tighter)
+
+        XCTAssertFalse(kept.isEmpty)
+        XCTAssertEqual(kept[0].start, 1.85, accuracy: 0.001)
+    }
+
+    func testUntouchedPacingPreservesRecordingEdges() {
+        let words = [word("Middle", 1.0, 2.0)]
+
+        let kept = AudioEditPlanner.keptRanges(words: words, duration: 3, pacing: .untouched)
+
+        XCTAssertEqual(kept, [AudioTimeRange(start: 0, end: 3)])
+    }
+
+    func testEditPlannerReturnsNoAudioWhenEveryTranscriptWordIsRemoved() {
+        let words = [
+            word("Remove", 0.5, 1.0, removed: true),
+            word("everything", 1.1, 1.8, removed: true)
+        ]
+
+        XCTAssertTrue(AudioEditPlanner.keptRanges(words: words, duration: 3, pacing: .natural).isEmpty)
+        XCTAssertTrue(AudioEditPlanner.keptRanges(words: words, duration: 3, pacing: .untouched).isEmpty)
+    }
+
+    func testEditedAudioRendererProducesShorterPlayableWave() throws {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PoetEngineTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+
+        let source = folder.appendingPathComponent("source.wav")
+        let edited = folder.appendingPathComponent("edited.wav")
+        try makeTone(at: source, duration: 2)
+
+        try EditedAudioRenderer.render(
+            sourceURL: source,
+            destinationURL: edited,
+            keptRanges: [
+                AudioTimeRange(start: 0, end: 0.55),
+                AudioTimeRange(start: 1.25, end: 2)
+            ]
+        )
+
+        let input = try AVAudioFile(forReading: source)
+        let output = try AVAudioFile(forReading: edited)
+        XCTAssertGreaterThan(output.length, 0)
+        XCTAssertLessThan(output.length, input.length * 3 / 4)
+    }
+
+    func testEditedAudioRendererToleratesTruncatedFinalCompressedPacket() throws {
+        let source = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("test_42.m4a")
+        guard FileManager.default.fileExists(atPath: source.path) else {
+            throw XCTSkip("test_42.m4a is not available in this checkout.")
+        }
+
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PoetTruncatedPacketTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+
+        let input = try AVAudioFile(forReading: source)
+        let duration = Double(input.length) / input.processingFormat.sampleRate
+        let edited = folder.appendingPathComponent("edited.wav")
+        try EditedAudioRenderer.render(
+            sourceURL: source,
+            destinationURL: edited,
+            keptRanges: [AudioTimeRange(start: 0, end: duration)]
+        )
+
+        let output = try AVAudioFile(forReading: edited)
+        XCTAssertGreaterThan(output.length, input.length - 32_768)
+        XCTAssertLessThanOrEqual(output.length, input.length)
+    }
+
+    func testNativePolishChainRendersPlayableAudio() throws {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PoetPolishTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+
+        let source = folder.appendingPathComponent("source.wav")
+        let finished = folder.appendingPathComponent("finished.wav")
+        try makeTone(at: source, duration: 1.2)
+        try VoicePolisher.render(
+            sourceURL: source,
+            destinationURL: finished,
+            options: AudioRenderOptions(
+                pacing: .natural,
+                reduceNoise: false,
+                voiceEQ: true,
+                deEss: true,
+                compression: true,
+                forceMono: false,
+                breathControl: true,
+                normalizeLoudness: true,
+                loudnessPreset: .podcast
+            )
+        )
+
+        let output = try AVAudioFile(forReading: finished)
+        XCTAssertGreaterThan(output.length, 40_000)
+        let loudness = try LoudnessAnalyzer.measure(url: finished)
+        XCTAssertEqual(loudness.integratedLUFS, LoudnessPreset.podcast.targetLUFS, accuracy: 1.0)
+        XCTAssertLessThanOrEqual(loudness.peakDBFS, LoudnessPreset.podcast.peakCeilingDBFS + 0.1)
+    }
+
+    func testBreathControlGentlyAttenuatesDetectedBreath() throws {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PoetBreathTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+
+        let source = folder.appendingPathComponent("breath-source.wav")
+        let controlled = folder.appendingPathComponent("breath-controlled.wav")
+        try makeBreathFixture(at: source)
+
+        let result = try BreathController.process(
+            dryReferenceURL: source,
+            sourceURL: source,
+            destinationURL: controlled
+        )
+        XCTAssertGreaterThan(result.count, 0)
+
+        let inputWindows = try BreathDetector.signatures(for: source)
+        let outputWindows = try BreathDetector.signatures(for: controlled)
+        let breathGains = zip(inputWindows, outputWindows).compactMap { input, output -> Double? in
+            let midpoint = (input.range.start + input.range.end) / 2
+            guard result.regions.contains(where: { midpoint >= $0.start && midpoint <= $0.end }) else { return nil }
+            return output.rmsDB - input.rmsDB
+        }
+        XCTAssertFalse(breathGains.isEmpty)
+        XCTAssertLessThan(breathGains.reduce(0, +) / Double(breathGains.count), -0.5)
+    }
+
+    func testSubtitleTimestampsFollowTheEditedTimeline() {
+        let words = [
+            word("First", 0.2, 0.7),
+            word("discarded", 1.0, 2.8, removed: true),
+            word("Second", 3.2, 3.8)
+        ]
+        let ranges = AudioEditPlanner.keptRanges(words: words, duration: 4, pacing: .untouched)
+        let srt = SubtitleRenderer.srt(words: words.filter { !$0.isRemoved }, keptRanges: ranges)
+
+        XCTAssertTrue(srt.contains("First Second"))
+        XCTAssertFalse(srt.contains("discarded"))
+        XCTAssertEqual(AudioEditPlanner.editedTime(for: 3.2, keptRanges: ranges), 1.35, accuracy: 0.001)
+        XCTAssertTrue(srt.contains("00:00:01,950"), srt)
+        XCTAssertEqual(AudioEditPlanner.editedDuration(for: ranges), 2.15, accuracy: 0.001)
+    }
+
+    func testRealRecordingExportsSynchronizedPackage() throws {
+        let workspaceSource = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("short_Test Recording.m4a")
+        let source = FileManager.default.fileExists(atPath: workspaceSource.path)
+            ? workspaceSource
+            : Bundle(for: Self.self).url(forResource: "short_Test Recording", withExtension: "m4a")
+        guard let source else {
+            throw XCTSkip("The supplied recording fixture is not present.")
+        }
+
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PoetPackageTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+
+        let sourceFile = try AVAudioFile(forReading: source)
+        let sourceDuration = Double(sourceFile.length) / sourceFile.processingFormat.sampleRate
+        let analysis = try AudioSignalAnalyzer.analyze(url: source)
+        XCTAssertTrue((-120 ... 0).contains(analysis.noiseFloorDB))
+        XCTAssertTrue((-120 ... 0).contains(analysis.speechLevelDB))
+        XCTAssertTrue((0 ... 1).contains(analysis.sibilanceScore))
+        XCTAssertTrue((0 ... 1).contains(analysis.presenceScore))
+        let words = [
+            word("Keep", 0.4, 1.0),
+            word("remove", 4.0, 5.0, removed: true),
+            word("this", 5.1, 5.6, removed: true),
+            word("Finish", 8.0, 8.7)
+        ]
+        let renderOptions = AudioRenderOptions(
+            pacing: .natural,
+            reduceNoise: true,
+            voiceEQ: true,
+            deEss: true,
+            compression: true,
+            forceMono: true,
+            breathControl: true,
+            normalizeLoudness: true,
+            loudnessPreset: .podcast
+        )
+        let request = ExportPackageRequest(
+            folder: folder,
+            baseName: "integration",
+            sourceURL: source,
+            words: words,
+            duration: sourceDuration,
+            renderOptions: renderOptions,
+            includeAudio: true,
+            includeTXT: true,
+            includeSRT: true,
+            includeVTT: true
+        )
+
+        let exported = try ExportPackageRenderer.render(request)
+        let finishedAudio = exported.appendingPathComponent("integration-finished.wav")
+        let output = try AVAudioFile(forReading: finishedAudio)
+        let outputDuration = Double(output.length) / output.processingFormat.sampleRate
+        let sourceLoudness = try LoudnessAnalyzer.measure(url: source)
+        let outputLoudness = try LoudnessAnalyzer.measure(url: finishedAudio)
+        print(String(format: "Real recording loudness: %.2f LUFS / %.2f dB peak → %.2f LUFS / %.2f dB peak", sourceLoudness.integratedLUFS, sourceLoudness.peakDBFS, outputLoudness.integratedLUFS, outputLoudness.peakDBFS))
+        let transcript = try String(contentsOf: exported.appendingPathComponent("integration.txt"), encoding: .utf8)
+        let subtitles = try String(contentsOf: exported.appendingPathComponent("integration.srt"), encoding: .utf8)
+        let webVTT = try String(contentsOf: exported.appendingPathComponent("integration.vtt"), encoding: .utf8)
+
+        XCTAssertEqual(transcript, "Keep Finish")
+        XCTAssertFalse(subtitles.contains("remove"))
+        XCTAssertTrue(webVTT.hasPrefix("WEBVTT\n\n"))
+        XCTAssertGreaterThan(outputDuration, 0)
+        XCTAssertLessThan(outputDuration, sourceDuration)
+        XCTAssertEqual(output.processingFormat.channelCount, 1)
+        XCTAssertGreaterThan(outputLoudness.integratedLUFS, sourceLoudness.integratedLUFS)
+        XCTAssertEqual(outputLoudness.integratedLUFS, LoudnessPreset.podcast.targetLUFS, accuracy: 1.5)
+        XCTAssertLessThanOrEqual(outputLoudness.peakDBFS, LoudnessPreset.podcast.peakCeilingDBFS + 0.1)
+
+        let dry = folder.appendingPathComponent("quality-dry.wav")
+        let qualityOutput = folder.appendingPathComponent("quality-polished.wav")
+        let ranges = AudioEditPlanner.keptRanges(words: words, duration: sourceDuration, pacing: .natural)
+        try EditedAudioRenderer.render(sourceURL: source, destinationURL: dry, keptRanges: ranges)
+        let report = try VoicePolisher.render(sourceURL: dry, destinationURL: qualityOutput, options: renderOptions)
+        print("Real recording post-check: \(report.quality.summary); gentle retry: \(report.quality.usedGentleCompression); controlled breaths: \(report.breathControl?.count ?? 0)")
+        XCTAssertTrue(report.quality.passed, report.quality.summary)
+        XCTAssertLessThanOrEqual(report.quality.breathLiftDB, 2.5)
+    }
+
+    private func word(_ text: String, _ start: TimeInterval, _ end: TimeInterval, removed: Bool = false) -> TranscriptWord {
+        TranscriptWord(
+            id: UUID(),
+            text: text,
+            startTime: start,
+            endTime: end,
+            reason: removed ? "Test" : nil,
+            isRemoved: removed,
+            wasSuggested: removed
+        )
+    }
+
+    private func makeTone(at url: URL, duration: TimeInterval) throws {
+        let sampleRate = 48_000.0
+        let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: sampleRate, channels: 1, interleaved: false)!
+        let frameCount = AVAudioFrameCount(sampleRate * duration)
+        let file = try AVAudioFile(forWriting: url, settings: format.settings, commonFormat: .pcmFormatFloat32, interleaved: false)
+        let blockSize: AVAudioFrameCount = 4096
+        var written: AVAudioFrameCount = 0
+        while written < frameCount {
+            let count = min(blockSize, frameCount - written)
+            let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: count)!
+            buffer.frameLength = count
+            let samples = buffer.floatChannelData![0]
+            for index in 0..<Int(count) {
+                let absolute = Double(written + AVAudioFrameCount(index))
+                samples[index] = Float(sin(2 * .pi * 220 * absolute / sampleRate) * 0.2)
+            }
+            try file.write(from: buffer)
+            written += count
+        }
+    }
+
+    private func addSine(
+        to samples: inout [Float],
+        sampleRate: Double,
+        range: Range<TimeInterval>,
+        amplitude: Float
+    ) {
+        let start = max(0, Int(range.lowerBound * sampleRate))
+        let end = min(samples.count, Int(range.upperBound * sampleRate))
+        for index in start..<end {
+            samples[index] += amplitude * Float(sin(2 * .pi * 180 * Double(index) / sampleRate))
+        }
+    }
+
+    private func addAlternatingNoise(
+        to samples: inout [Float],
+        sampleRate: Double,
+        range: Range<TimeInterval>,
+        amplitude: Float
+    ) {
+        let start = max(0, Int(range.lowerBound * sampleRate))
+        let end = min(samples.count, Int(range.upperBound * sampleRate))
+        for index in start..<end {
+            samples[index] += index.isMultiple(of: 2) ? amplitude : -amplitude
+        }
+    }
+
+    private func makeBreathFixture(at url: URL) throws {
+        let sampleRate = 48_000.0
+        let duration = 2.0
+        let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: sampleRate, channels: 1, interleaved: false)!
+        let frameCount = AVAudioFrameCount(sampleRate * duration)
+        let file = try AVAudioFile(forWriting: url, settings: format.settings, commonFormat: .pcmFormatFloat32, interleaved: false)
+        let blockSize: AVAudioFrameCount = 4_096
+        var written: AVAudioFrameCount = 0
+        var randomState: UInt64 = 0x1234_5678
+
+        while written < frameCount {
+            let count = min(blockSize, frameCount - written)
+            let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: count)!
+            buffer.frameLength = count
+            let samples = buffer.floatChannelData![0]
+            for index in 0..<Int(count) {
+                let absolute = Double(written + AVAudioFrameCount(index))
+                let time = absolute / sampleRate
+                if (0.15 ... 0.70).contains(time) || (1.10 ... 1.75).contains(time) {
+                    samples[index] = Float(sin(2 * .pi * 190 * absolute / sampleRate) * 0.20)
+                } else if (0.76 ... 0.98).contains(time) {
+                    randomState = randomState &* 6_364_136_223_846_793_005 &+ 1
+                    let noise = Double(Int32(truncatingIfNeeded: randomState >> 32)) / Double(Int32.max)
+                    samples[index] = Float(noise * 0.035)
+                } else {
+                    samples[index] = 0
+                }
+            }
+            try file.write(from: buffer)
+            written += count
+        }
+    }
+}

@@ -1,0 +1,4 @@
+module PoetDenoise {
+    header "sherpa-onnx/c-api/c-api.h"
+    export *
+}

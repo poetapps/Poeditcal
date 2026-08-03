@@ -1,0 +1,17 @@
+# macOS
+.DS_Store
+
+# Swift Package Manager and build products
+/.build/
+/.swiftpm/
+/DerivedData/
+
+# Xcode user-specific state
+xcuserdata/
+*.xcuserstate
+
+# Generated test and comparison output
+/Artifacts/
+
+# Large local recording used only by opt-in development tests
+/test_42.m4a
