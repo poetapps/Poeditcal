@@ -10,8 +10,12 @@
 xcuserdata/
 *.xcuserstate
 
+# Editor-specific settings
+/.vscode/
+
 # Generated test and comparison output
 /Artifacts/
 
 # Large local recording used only by opt-in development tests
 /test_42.m4a
+/short_Test Recording.m4a
