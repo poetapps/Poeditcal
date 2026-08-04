@@ -18,7 +18,7 @@ jobs:
   release:
     name: Sign, notarize, and publish
     runs-on: macos-26
-    timeout-minutes: 60
+    timeout-minutes: 180
     env:
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
       SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
@@ -132,28 +132,9 @@ jobs:
             codesign -dv --verbose=4 "$COMPONENT" 2>&1 | grep -q '^Timestamp='
           done
 
-      - name: Notarize app
-        env:
-          API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
-          API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
-          API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
-        run: |
-          APP_PATH="$RUNNER_TEMP/export/Poet Audio.app"
-          API_KEY_PATH="$RUNNER_TEMP/AuthKey_${API_KEY_ID}.p8"
-          NOTARY_ZIP="$RUNNER_TEMP/Poet-Audio-notary.zip"
-
-          printf '%s' "$API_KEY_P8" | base64 -D > "$API_KEY_PATH"
-          ditto -c -k --keepParent "$APP_PATH" "$NOTARY_ZIP"
-          xcrun notarytool submit "$NOTARY_ZIP" \
-            --key "$API_KEY_PATH" \
-            --key-id "$API_KEY_ID" \
-            --issuer "$API_ISSUER_ID" \
-            --wait
-          xcrun stapler staple "$APP_PATH"
-          xcrun stapler validate "$APP_PATH"
-
       - name: Create, sign, and notarize DMG
         env:
+          API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
           API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
         run: |
@@ -162,6 +143,7 @@ jobs:
           DMG_PATH="$RUNNER_TEMP/Poet-Audio-${VERSION}.dmg"
           API_KEY_PATH="$RUNNER_TEMP/AuthKey_${API_KEY_ID}.p8"
 
+          printf '%s' "$API_KEY_P8" | base64 -D > "$API_KEY_PATH"
           ./Scripts/create-dmg.sh "$APP_PATH" "$DMG_PATH"
           codesign --force --timestamp --sign "$SIGNING_IDENTITY" "$DMG_PATH"
           codesign --verify --verbose=2 "$DMG_PATH"
