@@ -4,24 +4,45 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
-swift build -c release --disable-sandbox
-BIN_DIR="$(swift build -c release --show-bin-path --disable-sandbox)"
 APP_DIR="$PROJECT_ROOT/.build/PoetAudio.app"
+DERIVED_DATA="$PROJECT_ROOT/.build/LocalPackageDerivedData"
+BUILT_APP="$DERIVED_DATA/Build/Products/Release/Poet Audio.app"
 
 if [[ "$APP_DIR" != "$PROJECT_ROOT/.build/PoetAudio.app" ]]; then
     echo "Refusing to replace unexpected app path: $APP_DIR" >&2
     exit 1
 fi
-rm -rf "$APP_DIR"
-mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
-install -m 755 "$BIN_DIR/PoetAudio" "$APP_DIR/Contents/MacOS/PoetAudio"
-install -m 644 "$PROJECT_ROOT/Packaging/Info.plist" "$APP_DIR/Contents/Info.plist"
-install -m 644 "$PROJECT_ROOT/THIRD_PARTY_NOTICES.md" "$APP_DIR/Contents/Resources/THIRD_PARTY_NOTICES.md"
-if [[ -d "$BIN_DIR/Sparkle.framework" ]]; then
-    mkdir -p "$APP_DIR/Contents/Frameworks"
-    ditto "$BIN_DIR/Sparkle.framework" "$APP_DIR/Contents/Frameworks/Sparkle.framework"
+
+# Build through Xcode so local packages contain the same compiled Icon Composer
+# asset, Sparkle framework, Info.plist values, and helper services as releases.
+xcodebuild build \
+    -project "$PROJECT_ROOT/PoetAudio.xcodeproj" \
+    -scheme PoetAudio \
+    -configuration Release \
+    -destination 'platform=macOS' \
+    -derivedDataPath "$DERIVED_DATA" \
+    CODE_SIGN_IDENTITY=- \
+    CODE_SIGN_STYLE=Manual \
+    DEVELOPMENT_TEAM=
+
+if [[ ! -d "$BUILT_APP" ]]; then
+    echo "Xcode did not produce the expected app at: $BUILT_APP" >&2
+    exit 1
 fi
-codesign --force --deep --sign - --entitlements "$PROJECT_ROOT/Packaging/PoetAudio.debug.entitlements" "$APP_DIR"
+
+rm -rf "$APP_DIR"
+ditto "$BUILT_APP" "$APP_DIR"
+
+# Sparkle's downloaded binary framework may retain its upstream signature in a
+# local ad-hoc build. Re-sign the complete bundle consistently and disable
+# library validation only for this local package so dyld accepts Sparkle.
+codesign --force --deep --sign - \
+    --entitlements "$PROJECT_ROOT/Packaging/PoetAudio.debug.entitlements" \
+    "$APP_DIR"
 codesign --verify --deep --strict "$APP_DIR"
+
+test -f "$APP_DIR/Contents/Resources/Assets.car"
+test -f "$APP_DIR/Contents/Resources/poetaudio.icns"
+test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$APP_DIR/Contents/Info.plist")" = "poetaudio"
 
 echo "$APP_DIR"

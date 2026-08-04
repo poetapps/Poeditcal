@@ -369,6 +369,7 @@
 		E50000000000000000000003 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = poetaudio;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
 				CODE_SIGN_ENTITLEMENTS = Packaging/PoetAudio.debug.entitlements;
 				CODE_SIGN_IDENTITY = "-";
@@ -408,6 +409,7 @@
 		E50000000000000000000004 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = poetaudio;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
 				CODE_SIGN_ENTITLEMENTS = Packaging/PoetAudio.entitlements;
 				CODE_SIGN_IDENTITY = "Developer ID Application";

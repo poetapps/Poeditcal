@@ -17,7 +17,7 @@ concurrency:
 jobs:
   release:
     name: Sign, notarize, and publish
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 60
     env:
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -97,6 +97,14 @@ jobs:
           test -d "$APP_PATH"
           codesign --verify --deep --strict --verbose=2 "$APP_PATH"
           test -d "$APP_PATH/Contents/Frameworks/Sparkle.framework"
+          test -f "$APP_PATH/Contents/Resources/Assets.car"
+          test -f "$APP_PATH/Contents/Resources/poetaudio.icns"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$APP_PATH/Contents/Info.plist")" = "poetaudio"
+
+          APP_TEAM_ID="$(codesign -dv --verbose=4 "$APP_PATH" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+          SPARKLE_TEAM_ID="$(codesign -dv --verbose=4 "$APP_PATH/Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+          test "$APP_TEAM_ID" = "$APPLE_TEAM_ID"
+          test "$SPARKLE_TEAM_ID" = "$APPLE_TEAM_ID"
 
       - name: Notarize app
         env:
