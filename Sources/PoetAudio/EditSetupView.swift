@@ -2,6 +2,7 @@ import SwiftUI
 
 struct EditSetupView: View {
     @EnvironmentObject private var model: AppModel
+    @EnvironmentObject private var smartEditModel: SmartEditModelStore
     @State private var step = 0
 
     private let stepNames = ["Control", "Intensity", "Pacing", "First pass"]
@@ -69,7 +70,7 @@ struct EditSetupView: View {
                 VStack(spacing: 8) {
                     SetupRow(
                         title: "Filler words",
-                        detail: "Um, uh, I mean, you know, and repeated acknowledgements.",
+                        detail: "Clear hesitations and repeated acknowledgements. Contextual phrases stay protected.",
                         icon: "text.badge.minus",
                         isOn: $model.autoEditConfiguration.removeFillers
                     )
@@ -88,6 +89,10 @@ struct EditSetupView: View {
                 }
                 .opacity(model.editingMode == .autopilot ? 1 : 0.4)
                 .allowsHitTesting(model.editingMode == .autopilot)
+
+                SmartEditModelPicker()
+                    .opacity(model.editingMode == .autopilot ? 1 : 0.4)
+                    .allowsHitTesting(model.editingMode == .autopilot)
             }
         }
     }
@@ -178,6 +183,96 @@ struct EditSetupView: View {
             }
             .buttonStyle(PrimaryButtonStyle())
         }
+    }
+}
+
+private struct SmartEditModelPicker: View {
+    @EnvironmentObject private var smartEditModel: SmartEditModelStore
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Smart Edit model")
+                        .font(PoetTheme.utility(12, weight: .semibold))
+                    Text("Optional · runs locally · choose one or install both")
+                        .font(PoetTheme.utility(9))
+                        .foregroundStyle(PoetTheme.muted)
+                }
+                Spacer()
+                if smartEditModel.isInstalled(smartEditModel.selectedChoice) {
+                    Label("Ready", systemImage: "checkmark.circle.fill")
+                        .font(PoetTheme.utility(9, weight: .semibold))
+                        .foregroundStyle(PoetTheme.sage)
+                }
+            }
+
+            HStack(spacing: 10) {
+                ForEach(SmartEditModelChoice.allCases) { choice in
+                    modelCard(choice)
+                }
+            }
+
+            if let error = smartEditModel.errorMessage {
+                Text(error)
+                    .font(PoetTheme.utility(9, weight: .medium))
+                    .foregroundStyle(PoetTheme.error)
+                    .lineLimit(2)
+            }
+        }
+        .padding(15)
+        .background(PoetTheme.card)
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private func modelCard(_ choice: SmartEditModelChoice) -> some View {
+        let selected = smartEditModel.selectedChoice == choice
+        let installed = smartEditModel.isInstalled(choice)
+        let downloading = smartEditModel.downloadingChoice == choice
+
+        return Button {
+            if installed {
+                smartEditModel.select(choice)
+            } else {
+                Task { await smartEditModel.install(choice) }
+            }
+        } label: {
+            VStack(alignment: .leading, spacing: 7) {
+                HStack {
+                    Text(choice.title)
+                        .font(PoetTheme.utility(11, weight: .semibold))
+                    Spacer()
+                    if downloading {
+                        ProgressView(value: smartEditModel.downloadProgress)
+                            .progressViewStyle(.circular)
+                            .controlSize(.small)
+                    } else {
+                        Image(systemName: selected ? "checkmark.circle.fill" : (installed ? "checkmark.circle" : "arrow.down.circle"))
+                            .foregroundStyle(selected ? PoetTheme.sage : PoetTheme.muted)
+                    }
+                }
+                Text(choice.modelName)
+                    .font(PoetTheme.utility(9, weight: .medium))
+                    .foregroundStyle(PoetTheme.cream)
+                Text(choice.detail)
+                    .font(PoetTheme.utility(9))
+                    .foregroundStyle(PoetTheme.muted)
+                    .lineLimit(2)
+                Text(installed ? (selected ? "Selected" : "Use this model") : (downloading ? "Downloading \(Int(smartEditModel.downloadProgress * 100))%" : "Download"))
+                    .font(PoetTheme.utility(8, weight: .semibold))
+                    .foregroundStyle(installed || downloading ? PoetTheme.sage : PoetTheme.amber)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, minHeight: 108, alignment: .topLeading)
+            .background(selected ? PoetTheme.sageDark.opacity(0.7) : PoetTheme.elevated)
+            .overlay {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(selected ? PoetTheme.sage.opacity(0.55) : Color.clear, lineWidth: 1)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .disabled(smartEditModel.downloadingChoice != nil)
     }
 }
 

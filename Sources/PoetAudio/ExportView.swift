@@ -12,6 +12,14 @@ struct ExportView: View {
                             VStack(alignment: .leading, spacing: 18) {
                                 SectionLabel(text: "Files to include")
                                 ExportToggle(title: "Finished audio", detail: "The edited and polished recording", icon: "waveform", isOn: $model.exportAudio)
+                                if model.audioURL != nil {
+                                    ExportToggle(
+                                        title: "Unmodified original",
+                                        detail: "An exact copy with no edits or processing",
+                                        icon: "waveform.path",
+                                        isOn: $model.exportOriginal
+                                    )
+                                }
                                 Rectangle().fill(PoetTheme.divider).frame(height: 1)
                                 ExportToggle(title: "Plain transcript", detail: "Readable .txt without timestamps", icon: "doc.plaintext", isOn: $model.exportTXT)
                                 ExportToggle(title: "SRT subtitles", detail: "Timed captions for most video platforms", icon: "captions.bubble", isOn: $model.exportSRT)
@@ -99,7 +107,7 @@ struct ExportView: View {
                                     .foregroundStyle(PoetTheme.amber)
                             }
 
-                            Text(model.isDemoTranscript ? "The interface sample can export transcript sidecars. Choose a recording to render finished audio." : "Finished audio is rendered as a lossless WAV beside the transcript files you selected.")
+                            Text(model.isDemoTranscript ? "The interface sample can export transcript sidecars. Choose a recording to render finished audio." : "Finished audio is rendered as a lossless WAV. The optional original is copied byte-for-byte in its source format.")
                                 .font(PoetTheme.utility(9))
                                 .foregroundStyle(PoetTheme.faint)
                                 .lineSpacing(2)

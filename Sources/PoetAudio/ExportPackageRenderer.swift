@@ -5,12 +5,42 @@ struct ExportPackageRequest: Sendable {
     let baseName: String
     let sourceURL: URL?
     let words: [TranscriptWord]
+    let pauseDecisions: [PauseEditDecision]?
     let duration: TimeInterval
     let renderOptions: AudioRenderOptions
     let includeAudio: Bool
+    let includeOriginal: Bool
     let includeTXT: Bool
     let includeSRT: Bool
     let includeVTT: Bool
+
+    init(
+        folder: URL,
+        baseName: String,
+        sourceURL: URL?,
+        words: [TranscriptWord],
+        pauseDecisions: [PauseEditDecision]? = nil,
+        duration: TimeInterval,
+        renderOptions: AudioRenderOptions,
+        includeAudio: Bool,
+        includeOriginal: Bool = false,
+        includeTXT: Bool,
+        includeSRT: Bool,
+        includeVTT: Bool
+    ) {
+        self.folder = folder
+        self.baseName = baseName
+        self.sourceURL = sourceURL
+        self.words = words
+        self.pauseDecisions = pauseDecisions
+        self.duration = duration
+        self.renderOptions = renderOptions
+        self.includeAudio = includeAudio
+        self.includeOriginal = includeOriginal
+        self.includeTXT = includeTXT
+        self.includeSRT = includeSRT
+        self.includeVTT = includeVTT
+    }
 }
 
 enum ExportPackageRenderer {
@@ -24,9 +54,24 @@ enum ExportPackageRenderer {
         let ranges = AudioEditPlanner.keptRanges(
             words: request.words,
             duration: request.duration,
-            maximumPause: request.renderOptions.maximumPause
+            maximumPause: request.renderOptions.maximumPause,
+            pauseDecisions: request.pauseDecisions
         )
         let keptWords = request.words.filter { !$0.isRemoved }
+
+        if request.includeOriginal {
+            guard let sourceURL = request.sourceURL else {
+                throw CocoaError(.fileNoSuchFile, userInfo: [
+                    NSLocalizedDescriptionKey: "Choose a real audio file before exporting the original recording."
+                ])
+            }
+            let sourceExtension = sourceURL.pathExtension.isEmpty ? "audio" : sourceURL.pathExtension.lowercased()
+            let originalURL = exportFolder.appendingPathComponent(
+                "\(request.baseName)-original.\(sourceExtension)"
+            )
+            try? FileManager.default.removeItem(at: originalURL)
+            try FileManager.default.copyItem(at: sourceURL, to: originalURL)
+        }
 
         if request.includeTXT {
             try keptWords.map(\.text).joined(separator: " ").write(

@@ -180,6 +180,57 @@ final class LocalSpeechTranscriber {
     }
 }
 
+/// The cleaned analysis pass can occasionally make a quiet hesitation less
+/// salient to ASR. Keep its generally clearer transcript, then merge only the
+/// high-value disfluency tokens recovered from a second pass over the untouched
+/// recording. Timeline proximity prevents ordinary duplicate words.
+enum TranscriptionMerger {
+    private static let hesitationWords: Set<String> = [
+        "um", "umm", "uh", "uhh", "erm", "er", "hmm"
+    ]
+
+    static func recoverHesitations(
+        primary: [TranscribedToken],
+        original: [TranscribedToken]
+    ) -> [TranscribedToken] {
+        guard !primary.isEmpty, !original.isEmpty else { return primary }
+        var merged = primary
+
+        for candidate in original where hesitationWords.contains(normalize(candidate.text)) {
+            let midpoint = candidate.startTime + candidate.duration / 2
+            let alreadyPresent = merged.contains { token in
+                hesitationWords.contains(normalize(token.text)) &&
+                    abs(token.startTime - candidate.startTime) <= 0.32
+            }
+            guard !alreadyPresent else { continue }
+
+            // Do not insert a hesitation on top of a confidently timestamped
+            // primary word. Genuine missing fillers normally occupy an exposed
+            // gap between neighboring primary tokens.
+            let collidesWithPrimaryWord = merged.contains { token in
+                !hesitationWords.contains(normalize(token.text)) &&
+                    midpoint >= token.startTime + 0.03 &&
+                    midpoint <= token.startTime + token.duration - 0.03
+            }
+            guard !collidesWithPrimaryWord else { continue }
+            merged.append(candidate)
+        }
+
+        return merged.sorted {
+            if abs($0.startTime - $1.startTime) < 0.001 {
+                return $0.duration < $1.duration
+            }
+            return $0.startTime < $1.startTime
+        }
+    }
+
+    private static func normalize(_ text: String) -> String {
+        text.lowercased().trimmingCharacters(
+            in: .punctuationCharacters.union(.whitespacesAndNewlines)
+        )
+    }
+}
+
 /// Parakeet's TDT duration advances the decoder through blank frames, so a
 /// token's nominal end can include the pause after the spoken word. Recover a
 /// conservative acoustic word end from the already-loaded waveform. These
@@ -200,7 +251,7 @@ enum SpeechTimingRefiner {
         samples: [Float],
         sampleRate: Double
     ) -> [TranscribedToken] {
-        guard tokens.count > 1, !samples.isEmpty, sampleRate > 0 else { return tokens }
+        guard !tokens.isEmpty, !samples.isEmpty, sampleRate > 0 else { return tokens }
         let windows = analyze(samples: samples, sampleRate: sampleRate)
         guard !windows.isEmpty else { return tokens }
 
@@ -210,9 +261,16 @@ enum SpeechTimingRefiner {
         guard speechLevel > noiseFloor + 4 else { return tokens }
 
         return tokens.enumerated().map { index, token in
-            guard index + 1 < tokens.count else { return token }
-            let nextStart = tokens[index + 1].startTime
-            guard nextStart > token.startTime + 0.04 else { return token }
+            let intervalEnd: TimeInterval
+            if index + 1 < tokens.count {
+                intervalEnd = tokens[index + 1].startTime
+            } else {
+                intervalEnd = min(
+                    Double(samples.count) / sampleRate,
+                    token.startTime + token.duration
+                )
+            }
+            guard intervalEnd > token.startTime + 0.04 else { return token }
 
             let firstWindow = min(
                 windows.count,
@@ -220,7 +278,7 @@ enum SpeechTimingRefiner {
             )
             let windowAfterInterval = min(
                 windows.count,
-                max(firstWindow, Int(ceil(nextStart / windowDuration)))
+                max(firstWindow, Int(ceil(intervalEnd / windowDuration)))
             )
             let candidates = windows[firstWindow..<windowAfterInterval]
             let activityGate = noiseFloor + min(10, max(5, (speechLevel - noiseFloor) * 0.38))
@@ -233,7 +291,7 @@ enum SpeechTimingRefiner {
             guard let lastSpeechEnd else { return token }
             // Preserve consonant releases and timestamp quantization at the word
             // edge, but never let that safety tail enter the next word.
-            let acousticEnd = min(nextStart, max(token.startTime + 0.04, lastSpeechEnd + 0.04))
+            let acousticEnd = min(intervalEnd, max(token.startTime + 0.04, lastSpeechEnd + 0.04))
             return TranscribedToken(
                 text: token.text,
                 startTime: token.startTime,

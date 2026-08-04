@@ -115,6 +115,12 @@ enum PolishPreviewMode: String, CaseIterable, Identifiable, Codable, Sendable {
     var id: String { rawValue }
 }
 
+enum EditPreviewMode: String, CaseIterable, Identifiable, Codable, Sendable {
+    case original = "Original"
+    case firstPass = "First pass"
+    var id: String { rawValue }
+}
+
 struct TranscriptWord: Identifiable, Hashable, Codable, Sendable {
     let id: UUID
     let text: String
@@ -139,8 +145,12 @@ final class AppModel: ObservableObject {
     @Published var processingLabel = "Preparing your audio"
     @Published var processingTip = "A little room tone helps noise reduction sound more natural."
     @Published var processingError: String?
+    @Published var firstPassStatus: String?
+    @Published var firstPassAudioURL: URL?
+    @Published var editPreviewMode: EditPreviewMode = .original
     @Published var isDemoTranscript = false
     @Published var words: [TranscriptWord] = []
+    @Published var pauseDecisions: [PauseEditDecision] = []
     @Published var currentTime: TimeInterval = 0
     @Published var isPlaying = false
     @Published var polishSelections: Set<PolishOption> = Set(
@@ -150,6 +160,7 @@ final class AppModel: ObservableObject {
     @Published var usePolish = true
     @Published var loudnessPreset: LoudnessPreset = .podcast
     @Published var exportAudio = true
+    @Published var exportOriginal = false
     @Published var exportTXT = true
     @Published var exportSRT = true
     @Published var exportVTT = false
@@ -195,6 +206,9 @@ final class AppModel: ObservableObject {
     private var recordingTask: Task<Void, Never>?
     private var recordingURL: URL?
     private var restoreAllSnapshot: [Bool]?
+    private var restoreAllPauseSnapshot: [(isCompacted: Bool, isProtected: Bool)]?
+    private var firstPassFolder: URL?
+    private var usesAcousticPauseDecisions = false
 
     private static let defaultPolishIntensities: [PolishOption: PolishIntensity] = [
         .noise: .balanced,
@@ -214,6 +228,7 @@ final class AppModel: ObservableObject {
 
     var removedWords: Int { words.filter(\.isRemoved).count }
     var restoredWords: Int { words.filter { $0.wasSuggested && !$0.isRemoved }.count }
+    var compactedPauses: Int { pauseDecisions.count(where: { $0.isCompacted && !$0.isProtected }) }
     var originalWordCount: Int { words.count }
     var editedWordCount: Int { words.filter { !$0.isRemoved }.count }
     var selectedWordCount: Int { selectedWordIDs.count }
@@ -225,7 +240,7 @@ final class AppModel: ObservableObject {
         words.filter { !$0.isRemoved }.map(\.text).joined(separator: " ")
     }
 
-    var hasExportSelection: Bool { exportAudio || exportTXT || exportSRT || exportVTT }
+    var hasExportSelection: Bool { exportAudio || exportOriginal || exportTXT || exportSRT || exportVTT }
     var enabledPolishCount: Int { usePolish ? polishSelections.count : 0 }
     var hasAppliedPolishPreview: Bool {
         polishPreviewSignature == currentPolishSignature && polishedPreviewURL != nil
@@ -233,12 +248,18 @@ final class AppModel: ObservableObject {
     var hasUnappliedPolishChanges: Bool { usePolish && !hasAppliedPolishPreview }
 
     private var currentKeptRanges: [AudioTimeRange] {
-        AudioEditPlanner.keptRanges(words: words, duration: duration, maximumPause: pauseDuration)
+        AudioEditPlanner.keptRanges(
+            words: words,
+            duration: duration,
+            maximumPause: pauseDuration,
+            pauseDecisions: usesAcousticPauseDecisions ? pauseDecisions : nil
+        )
     }
 
     func loadAudio(_ url: URL) {
         stopPlayback()
         discardPolishPreview()
+        discardFirstPass()
         processingTask?.cancel()
         speechTranscriber.cancel()
         if let securityScopedURL { securityScopedURL.stopAccessingSecurityScopedResource() }
@@ -249,10 +270,15 @@ final class AppModel: ObservableObject {
         projectName = url.deletingPathExtension().lastPathComponent
         projectStatus = nil
         exportAudio = true
+        exportOriginal = false
         fileName = url.lastPathComponent
         exportStatus = nil
         processingError = nil
+        firstPassStatus = nil
+        editPreviewMode = .original
         isDemoTranscript = false
+        pauseDecisions = []
+        usesAcousticPauseDecisions = false
         voiceAnalysis = nil
         sourceLoudness = nil
         polishedLoudness = nil
@@ -300,7 +326,13 @@ final class AppModel: ObservableObject {
                 let loaded = try await Task.detached(priority: .userInitiated) {
                     try PoetProjectStore.load(from: url)
                 }.value
-                installProject(loaded.snapshot, audioURL: loaded.audioURL, packageURL: url, accessed: accessed)
+                installProject(
+                    loaded.snapshot,
+                    audioURL: loaded.audioURL,
+                    firstPassAudioURL: loaded.firstPassAudioURL,
+                    packageURL: url,
+                    accessed: accessed
+                )
             } catch {
                 if accessed { url.stopAccessingSecurityScopedResource() }
                 projectStatus = "Couldn’t open project: \(error.localizedDescription)"
@@ -332,9 +364,12 @@ final class AppModel: ObservableObject {
         projectName = cleanName.isEmpty ? "Untitled Project" : cleanName
         let audioExtension = sourceURL.pathExtension.isEmpty ? "m4a" : sourceURL.pathExtension.lowercased()
         let sourceAudioFile = "Source Audio.\(audioExtension)"
+        let firstPassAudioFile = firstPassAudioURL == nil ? nil : "Analysis First Pass.wav"
+        let analysisPassURL = firstPassAudioURL
         let snapshot = PoetProjectSnapshot(
             projectName: projectName,
             sourceAudioFile: sourceAudioFile,
+            firstPassAudioFile: firstPassAudioFile,
             sourceDisplayName: fileName,
             phase: phase,
             editingMode: editingMode,
@@ -343,11 +378,13 @@ final class AppModel: ObservableObject {
             pauseDuration: pauseDuration,
             duration: duration,
             words: words,
+            pauseDecisions: usesAcousticPauseDecisions ? pauseDecisions : nil,
             polishSelections: polishSelections,
             polishIntensities: polishIntensities,
             usePolish: usePolish,
             loudnessPreset: loudnessPreset,
             exportAudio: exportAudio,
+            exportOriginal: exportOriginal,
             exportTXT: exportTXT,
             exportSRT: exportSRT,
             exportVTT: exportVTT
@@ -358,15 +395,27 @@ final class AppModel: ObservableObject {
             guard let self else { return }
             do {
                 let savedURL = try await Task.detached(priority: .userInitiated) {
-                    try PoetProjectStore.save(snapshot: snapshot, sourceAudioURL: sourceURL, to: url)
+                    try PoetProjectStore.save(
+                        snapshot: snapshot,
+                        sourceAudioURL: sourceURL,
+                        firstPassAudioURL: analysisPassURL,
+                        to: url
+                    )
                 }.value
                 let savedAudioURL = savedURL.appendingPathComponent(sourceAudioFile)
+                let savedFirstPassURL = firstPassAudioFile.map { savedURL.appendingPathComponent($0) }
                 if let securityScopedURL { securityScopedURL.stopAccessingSecurityScopedResource() }
                 _ = savedURL.startAccessingSecurityScopedResource()
                 securityScopedURL = savedURL
                 projectURL = savedURL
                 audioURL = savedAudioURL
-                if phase == .setup || phase == .edit { loadPlayer(url: savedAudioURL, usesEditedTimeline: false) }
+                if let firstPassFolder { try? FileManager.default.removeItem(at: firstPassFolder) }
+                firstPassFolder = nil
+                firstPassAudioURL = savedFirstPassURL
+                if phase == .setup || phase == .edit {
+                    let editURL = editPreviewMode == .firstPass ? (savedFirstPassURL ?? savedAudioURL) : savedAudioURL
+                    loadPlayer(url: editURL, usesEditedTimeline: false)
+                }
                 projectStatus = "Saved \(savedURL.lastPathComponent)"
             } catch {
                 projectStatus = "Couldn’t save project: \(error.localizedDescription)"
@@ -378,11 +427,13 @@ final class AppModel: ObservableObject {
     private func installProject(
         _ snapshot: PoetProjectSnapshot,
         audioURL loadedAudioURL: URL,
+        firstPassAudioURL loadedFirstPassAudioURL: URL?,
         packageURL: URL,
         accessed: Bool
     ) {
         stopPlayback()
         discardPolishPreview()
+        discardFirstPass()
         processingTask?.cancel()
         speechTranscriber.cancel()
         if let securityScopedURL { securityScopedURL.stopAccessingSecurityScopedResource() }
@@ -390,6 +441,9 @@ final class AppModel: ObservableObject {
         projectURL = packageURL
         projectName = snapshot.projectName
         audioURL = loadedAudioURL
+        firstPassAudioURL = loadedFirstPassAudioURL
+        editPreviewMode = loadedFirstPassAudioURL == nil ? .original : .firstPass
+        firstPassStatus = loadedFirstPassAudioURL == nil ? nil : "Timing-aligned first pass ready"
         fileName = snapshot.sourceDisplayName
         duration = snapshot.duration
         editingMode = snapshot.editingMode
@@ -397,11 +451,14 @@ final class AppModel: ObservableObject {
         pacing = snapshot.pacing
         pauseDuration = snapshot.pauseDuration ?? snapshot.pacing.maximumPause ?? 2.0
         words = snapshot.words
+        pauseDecisions = snapshot.pauseDecisions ?? []
+        usesAcousticPauseDecisions = snapshot.pauseDecisions != nil
         polishSelections = snapshot.polishSelections
         polishIntensities = snapshot.polishIntensities ?? Self.defaultPolishIntensities
         usePolish = snapshot.usePolish
         loudnessPreset = snapshot.loudnessPreset
         exportAudio = snapshot.exportAudio
+        exportOriginal = snapshot.exportOriginal ?? false
         exportTXT = snapshot.exportTXT
         exportSRT = snapshot.exportSRT
         exportVTT = snapshot.exportVTT
@@ -417,7 +474,7 @@ final class AppModel: ObservableObject {
         selectedWordIDs = []
         playbackUsesEditedTimeline = false
         phase = snapshot.words.isEmpty ? .setup : normalizedRestoredPhase(snapshot.phase)
-        loadPlayer(url: loadedAudioURL, usesEditedTimeline: false)
+        loadPlayer(url: loadedFirstPassAudioURL ?? loadedAudioURL, usesEditedTimeline: false)
         projectStatus = "Opened \(packageURL.lastPathComponent)"
     }
 
@@ -515,38 +572,114 @@ final class AppModel: ObservableObject {
         guard let url = audioURL else { return }
         processingTask?.cancel()
         speechTranscriber.cancel()
+        discardFirstPass()
         processingError = nil
+        firstPassStatus = "Preparing a timing-aligned first pass"
+        pauseDecisions = []
         phase = .processing
         processingProgress = 0
         processingTask = Task { [weak self] in
             guard let self else { return }
             do {
-                processingLabel = "Reading the recording"
-                processingTip = "Your audio stays on this Mac while the transcript is created."
-                let tokens = try await speechTranscriber.transcribe(url: url) { fraction, label in
-                    self.processingProgress = min(fraction * 0.78, 0.78)
+                processingLabel = "Preparing a clean first pass"
+                processingTip = "The original stays untouched. This full-length copy keeps the same timeline."
+                let transcriptionURL: URL
+                if usePolish {
+                    let folder = FileManager.default.temporaryDirectory
+                        .appendingPathComponent("PoetFirstPass-\(UUID().uuidString)", isDirectory: true)
+                    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                    let firstPass = folder.appendingPathComponent("analysis-first-pass.wav")
+                    do {
+                        let report = try await Task.detached(priority: .userInitiated) {
+                            try AnalysisFirstPassRenderer.render(sourceURL: url, destinationURL: firstPass)
+                        }.value
+                        guard !Task.isCancelled else {
+                            try? FileManager.default.removeItem(at: folder)
+                            return
+                        }
+                        firstPassFolder = folder
+                        firstPassAudioURL = firstPass
+                        firstPassStatus = report.usedNoiseReduction
+                            ? "Noise-reduced, leveled, and timing-aligned"
+                            : "Leveled and timing-aligned"
+                        transcriptionURL = firstPass
+                    } catch {
+                        try? FileManager.default.removeItem(at: folder)
+                        firstPassAudioURL = nil
+                        firstPassStatus = "First pass unavailable — using the original"
+                        transcriptionURL = url
+                    }
+                } else {
+                    firstPassAudioURL = nil
+                    firstPassStatus = "First pass skipped — polish is off"
+                    transcriptionURL = url
+                }
+
+                processingProgress = 0.22
+                processingLabel = "Transcribing the first pass"
+                processingTip = "Every recognized word maps back to the untouched original."
+                let hasFirstPass = firstPassAudioURL != nil
+                let primaryTokens = try await speechTranscriber.transcribe(url: transcriptionURL) { fraction, label in
+                    let transcriptionShare = hasFirstPass ? 0.42 : 0.56
+                    self.processingProgress = 0.22 + min(fraction * transcriptionShare, transcriptionShare)
                     self.processingLabel = label
                     if fraction > 0.45 {
                         self.processingTip = "Every recognized word keeps its original start and end time."
                     }
                 }
+                let tokens: [TranscribedToken]
+                if hasFirstPass {
+                    processingLabel = "Recovering ums and uhs"
+                    processingTip = "Comparing the clean transcript with the untouched performance."
+                    if let originalTokens = try? await speechTranscriber.transcribe(url: url) { fraction, _ in
+                        self.processingProgress = 0.64 + min(fraction * 0.14, 0.14)
+                    } {
+                        tokens = TranscriptionMerger.recoverHesitations(
+                            primary: primaryTokens,
+                            original: originalTokens
+                        )
+                    } else {
+                        tokens = primaryTokens
+                    }
+                } else {
+                    tokens = primaryTokens
+                }
                 guard !Task.isCancelled else { return }
-                applyTranscription(tokens)
+                processingLabel = SmartEditModelStore.shared.isInstalled(
+                    SmartEditModelStore.shared.selectedChoice
+                ) ? "Understanding corrections and retakes" : "Looking for retakes and fillers"
+                processingTip = SmartEditModelStore.shared.isInstalled(
+                    SmartEditModelStore.shared.selectedChoice
+                ) ? "Smart Edit reads each phrase in context before suggesting a cut." : "Poet is using its built-in edit detector."
+                await applyTranscription(tokens)
                 processingProgress = 0.8
-                processingLabel = "Listening for room tone"
+                processingLabel = "Confirming real pauses"
+                let analyzedWords = words
+                let selectedPauseDuration = pauseDuration
                 async let analysis = Task.detached(priority: .userInitiated) {
                     try? AudioSignalAnalyzer.analyze(url: url)
                 }.value
                 async let loudness = Task.detached(priority: .userInitiated) {
                     try? LoudnessAnalyzer.measure(url: url)
                 }.value
+                async let pauses = Task.detached(priority: .userInitiated) {
+                    try? PauseAnalyzer.analyze(
+                        sourceURL: url,
+                        words: analyzedWords,
+                        maximumPause: selectedPauseDuration
+                    )
+                }.value
                 voiceAnalysis = await analysis
                 sourceLoudness = await loudness
+                pauseDecisions = await pauses ?? []
+                usesAcousticPauseDecisions = true
 
                 processingProgress = 1
                 processingLabel = "Preparing your review"
-                processingTip = "Nothing is permanently removed until you export."
+                processingTip = "Switch between Original and First pass without losing your place."
                 try? await Task.sleep(for: .milliseconds(180))
+                editPreviewMode = firstPassAudioURL == nil ? .original : .firstPass
+                loadPlayer(url: firstPassAudioURL ?? url, usesEditedTimeline: false)
                 phase = .edit
             } catch is CancellationError {
                 return
@@ -568,6 +701,7 @@ final class AppModel: ObservableObject {
 
     func cancelSetup() {
         stopPlayback()
+        discardFirstPass()
         if let securityScopedURL { securityScopedURL.stopAccessingSecurityScopedResource() }
         securityScopedURL = nil
         audioURL = nil
@@ -582,11 +716,15 @@ final class AppModel: ObservableObject {
     }
 
     func useDemoAudio() {
+        discardFirstPass()
         fileName = "Morning reflection.m4a"
         duration = 73
         audioURL = nil
         exportAudio = false
+        exportOriginal = false
         processingError = nil
+        pauseDecisions = []
+        usesAcousticPauseDecisions = false
         isDemoTranscript = true
         voiceAnalysis = .sample
         phase = .processing
@@ -604,15 +742,22 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func applyTranscription(_ tokens: [TranscribedToken]) {
+    private func applyTranscription(_ tokens: [TranscribedToken]) async {
         selectedWordIDs = []
-        let suggestions = AutoEditAnalyzer.suggestions(
+        var suggestions = AutoEditAnalyzer.suggestions(
             for: tokens,
             configuration: autoEditConfiguration
         )
+        if let contextual = try? await SmartEditModelStore.shared.contextualSuggestions(
+            for: tokens,
+            configuration: autoEditConfiguration
+        ) {
+            suggestions.append(contentsOf: contextual)
+        }
         var reasons: [Int: String] = [:]
         for suggestion in suggestions {
-            for index in suggestion.range { reasons[index] = suggestion.reason.rawValue }
+            let detail = "\(suggestion.reason.rawValue) · \(Int(suggestion.confidence * 100))% confidence"
+            for index in suggestion.range { reasons[index] = detail }
         }
         words = tokens.enumerated().map { index, token in
             let suggested = reasons[index] != nil
@@ -686,7 +831,12 @@ final class AppModel: ObservableObject {
 
     func restoreAll() {
         restoreAllSnapshot = words.map(\.isRemoved)
+        restoreAllPauseSnapshot = pauseDecisions.map { ($0.isCompacted, $0.isProtected) }
         for index in words.indices { words[index].isRemoved = false }
+        for index in pauseDecisions.indices {
+            pauseDecisions[index].isCompacted = false
+            pauseDecisions[index].isProtected = true
+        }
         selectedWordIDs = []
         canUndoRestoreAll = true
     }
@@ -694,15 +844,52 @@ final class AppModel: ObservableObject {
     func undoRestoreAll() {
         guard let restoreAllSnapshot, restoreAllSnapshot.count == words.count else { return }
         for index in words.indices { words[index].isRemoved = restoreAllSnapshot[index] }
+        if let restoreAllPauseSnapshot, restoreAllPauseSnapshot.count == pauseDecisions.count {
+            for index in pauseDecisions.indices {
+                pauseDecisions[index].isCompacted = restoreAllPauseSnapshot[index].isCompacted
+                pauseDecisions[index].isProtected = restoreAllPauseSnapshot[index].isProtected
+            }
+        }
         self.restoreAllSnapshot = nil
+        self.restoreAllPauseSnapshot = nil
         canUndoRestoreAll = false
     }
 
     func applySuggestions() {
         for index in words.indices where words[index].wasSuggested { words[index].isRemoved = true }
+        for index in pauseDecisions.indices {
+            pauseDecisions[index].isCompacted = true
+            pauseDecisions[index].isProtected = false
+        }
         selectedWordIDs = []
         restoreAllSnapshot = nil
+        restoreAllPauseSnapshot = nil
         canUndoRestoreAll = false
+    }
+
+    func togglePauseProtection(_ pause: PauseEditDecision) {
+        guard let index = pauseDecisions.firstIndex(where: { $0.id == pause.id }) else { return }
+        pauseDecisions[index].isProtected.toggle()
+        pauseDecisions[index].isCompacted = !pauseDecisions[index].isProtected
+    }
+
+    func selectEditPreview(_ mode: EditPreviewMode) {
+        guard mode != editPreviewMode else { return }
+        let destination: URL?
+        switch mode {
+        case .original:
+            destination = audioURL
+        case .firstPass:
+            destination = firstPassAudioURL
+        }
+        guard let destination else { return }
+        let sourceTime = playbackUsesEditedTimeline ? 0 : (player?.currentTime ?? currentTime)
+        let shouldResume = isPlaying
+        loadPlayer(url: destination, usesEditedTimeline: false)
+        player?.currentTime = min(sourceTime, player?.duration ?? sourceTime)
+        currentTime = player?.currentTime ?? sourceTime
+        editPreviewMode = mode
+        if shouldResume { startPlayback() }
     }
 
     func togglePlayback() {
@@ -955,12 +1142,15 @@ final class AppModel: ObservableObject {
 
     private var currentPolishSignature: String {
         let removed = words.enumerated().compactMap { $0.element.isRemoved ? String($0.offset) : nil }.joined(separator: ",")
+        let pauses = pauseDecisions.map {
+            "\($0.id.uuidString):\($0.isCompacted):\($0.isProtected)"
+        }.joined(separator: ",")
         let options = polishSelections.map(\.rawValue).sorted().joined(separator: ",")
         let intensities = PolishOption.allCases.compactMap { option -> String? in
             guard option != .forceMono else { return nil }
             return "\(option.rawValue):\(polishIntensity(for: option).rawValue)"
         }.joined(separator: ",")
-        return [removed, String(format: "%.2f", pauseDuration), String(usePolish), options, intensities, loudnessPreset.rawValue].joined(separator: "|")
+        return [removed, pauses, String(format: "%.2f", pauseDuration), String(usePolish), options, intensities, loudnessPreset.rawValue].joined(separator: "|")
     }
 
     private func preparePolishPreview() {
@@ -1090,7 +1280,8 @@ final class AppModel: ObservableObject {
 
     private func restoreSourcePlayer() {
         guard let audioURL else { return }
-        loadPlayer(url: audioURL, usesEditedTimeline: false)
+        let editURL = editPreviewMode == .firstPass ? (firstPassAudioURL ?? audioURL) : audioURL
+        loadPlayer(url: editURL, usesEditedTimeline: false)
     }
 
     private func loadPlayer(url: URL, usesEditedTimeline: Bool) {
@@ -1122,6 +1313,14 @@ final class AppModel: ObservableObject {
         breathControlResult = nil
     }
 
+    private func discardFirstPass() {
+        if let firstPassFolder { try? FileManager.default.removeItem(at: firstPassFolder) }
+        firstPassFolder = nil
+        firstPassAudioURL = nil
+        firstPassStatus = nil
+        editPreviewMode = .original
+    }
+
     func exportPackage() {
         guard !isExporting else { return }
         let panel = NSOpenPanel()
@@ -1139,9 +1338,11 @@ final class AppModel: ObservableObject {
             baseName: base,
             sourceURL: audioURL,
             words: words,
+            pauseDecisions: usesAcousticPauseDecisions ? pauseDecisions : nil,
             duration: duration,
             renderOptions: currentRenderOptions(),
             includeAudio: exportAudio,
+            includeOriginal: exportOriginal,
             includeTXT: exportTXT,
             includeSRT: exportSRT,
             includeVTT: exportVTT

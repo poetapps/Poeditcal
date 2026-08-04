@@ -53,6 +53,7 @@ final class PoetAppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 struct PoetAudioApp: App {
     @StateObject private var model = AppModel()
     @StateObject private var denoiseModel = DenoiseModelStore()
+    @StateObject private var smartEditModel = SmartEditModelStore.shared
     @StateObject private var updateController = UpdateController()
     @NSApplicationDelegateAdaptor(PoetAppDelegate.self) private var appDelegate
 
@@ -61,6 +62,7 @@ struct PoetAudioApp: App {
             RootView()
                 .environmentObject(model)
                 .environmentObject(denoiseModel)
+                .environmentObject(smartEditModel)
                 .environmentObject(appDelegate)
                 .preferredColorScheme(.dark)
                 .frame(minWidth: 980, minHeight: 680)

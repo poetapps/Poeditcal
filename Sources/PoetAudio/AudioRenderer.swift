@@ -92,10 +92,15 @@ enum AudioEditPlanner {
     static let transcriptEdgeBuffer: TimeInterval = 0.15
 
     static func keptRanges(words: [TranscriptWord], duration: TimeInterval, pacing: PacingPreset) -> [AudioTimeRange] {
-        keptRanges(words: words, duration: duration, maximumPause: pacing.maximumPause)
+        keptRanges(words: words, duration: duration, maximumPause: pacing.maximumPause, pauseDecisions: nil)
     }
 
-    static func keptRanges(words: [TranscriptWord], duration: TimeInterval, maximumPause: TimeInterval?) -> [AudioTimeRange] {
+    static func keptRanges(
+        words: [TranscriptWord],
+        duration: TimeInterval,
+        maximumPause: TimeInterval?,
+        pauseDecisions: [PauseEditDecision]? = nil
+    ) -> [AudioTimeRange] {
         guard duration > 0 else { return [] }
         let sorted = words.sorted { $0.startTime < $1.startTime }
         if !sorted.isEmpty, sorted.allSatisfy(\.isRemoved) { return [] }
@@ -135,19 +140,48 @@ enum AudioEditPlanner {
                 }
             }
 
-            // Measure pauses only from the end timestamp of one retained word to
-            // the start timestamp of the next. This also intentionally spans any
-            // transcript words removed between them. Splitting the kept pause
-            // evenly around the edit preserves a little room on both sides while
-            // guaranteeing that the edited end-to-start gap is `maximumPause`.
             let cappedPause = max(0, maximumPause)
-            for pair in zip(retained, retained.dropFirst()) {
-                let gapStart = min(duration, max(0, pair.0.endTime))
-                let gapEnd = min(duration, max(0, pair.1.startTime))
-                let gap = gapEnd - gapStart
-                guard gap > cappedPause else { continue }
-                let halfPause = cappedPause / 2
-                cuts.append(AudioTimeRange(start: gapStart + halfPause, end: gapEnd - halfPause))
+            if let pauseDecisions {
+                // Explicit decisions have already been checked against the
+                // waveform. An empty collection intentionally means “no
+                // acoustically confirmed pauses,” not “fall back to timestamps.”
+                for pause in pauseDecisions where pause.isCompacted && !pause.isProtected {
+                    let gapStart = min(duration, max(0, pause.sourceStart))
+                    let gapEnd = min(duration, max(0, pause.sourceEnd))
+                    let gap = gapEnd - gapStart
+                    guard gap > cappedPause else { continue }
+                    let halfPause = cappedPause / 2
+                    cuts.append(AudioTimeRange(start: gapStart + halfPause, end: gapEnd - halfPause))
+                }
+
+                // A very tight user-selected cap is an explicit pacing choice:
+                // honor it even when room tone, a breath, or an untranscribed
+                // hesitation made acoustic confirmation inconclusive. Also
+                // always recompute the new retained-word boundary across removed
+                // phrases so an edited sentence cannot leave seconds of buffer.
+                let indexedRetained = sorted.enumerated().filter { !$0.element.isRemoved }
+                for pair in zip(indexedRetained, indexedRetained.dropFirst()) {
+                    let removedWordsBetween = pair.1.offset > pair.0.offset + 1 &&
+                        sorted[(pair.0.offset + 1)..<pair.1.offset].contains(where: \.isRemoved)
+                    guard cappedPause <= 0.35 || removedWordsBetween else { continue }
+                    let gapStart = min(duration, max(0, pair.0.element.endTime))
+                    let gapEnd = min(duration, max(0, pair.1.element.startTime))
+                    let gap = gapEnd - gapStart
+                    guard gap > cappedPause else { continue }
+                    let halfPause = cappedPause / 2
+                    cuts.append(AudioTimeRange(start: gapStart + halfPause, end: gapEnd - halfPause))
+                }
+            } else {
+                // Compatibility path for v1 projects and direct planner callers.
+                // New projects provide acoustically validated pause decisions.
+                for pair in zip(retained, retained.dropFirst()) {
+                    let gapStart = min(duration, max(0, pair.0.endTime))
+                    let gapEnd = min(duration, max(0, pair.1.startTime))
+                    let gap = gapEnd - gapStart
+                    guard gap > cappedPause else { continue }
+                    let halfPause = cappedPause / 2
+                    cuts.append(AudioTimeRange(start: gapStart + halfPause, end: gapEnd - halfPause))
+                }
             }
         }
 
@@ -231,8 +265,9 @@ enum EditedAudioRenderer {
 
         let capacity: AVAudioFrameCount = 16_384
         let edgeFrames = AVAudioFramePosition(format.sampleRate * 0.008)
+        let renderRanges = snapInternalBoundaries(keptRanges, input: input, format: format)
 
-        for (segmentIndex, range) in keptRanges.enumerated() {
+        for (segmentIndex, range) in renderRanges.enumerated() {
             let startFrame = max(0, AVAudioFramePosition(range.start * format.sampleRate))
             let endFrame = min(input.length, AVAudioFramePosition(range.end * format.sampleRate))
             let segmentLength = endFrame - startFrame
@@ -264,12 +299,74 @@ enum EditedAudioRenderer {
                     segmentLength: segmentLength,
                     fadeFrames: min(edgeFrames, segmentLength / 3),
                     fadeIn: segmentIndex > 0,
-                    fadeOut: segmentIndex < keptRanges.count - 1
+                    fadeOut: segmentIndex < renderRanges.count - 1
                 )
                 try output.write(from: buffer)
                 segmentPosition += AVAudioFramePosition(buffer.frameLength)
             }
         }
+    }
+
+    /// Timestamp boundaries can land on a high-amplitude waveform sample. Move
+    /// each internal edge by at most 6 ms to the quietest nearby frame before the
+    /// existing safety fades are applied. This reduces clicks and clipped
+    /// consonant joins without materially changing pacing.
+    private static func snapInternalBoundaries(
+        _ ranges: [AudioTimeRange],
+        input: AVAudioFile,
+        format: AVAudioFormat
+    ) -> [AudioTimeRange] {
+        guard ranges.count > 1 else { return ranges }
+        var result = ranges
+        for index in result.indices {
+            if index > 0 {
+                result[index].start = quietestTime(near: result[index].start, input: input, format: format)
+            }
+            if index < result.count - 1 {
+                result[index].end = quietestTime(near: result[index].end, input: input, format: format)
+            }
+            if result[index].end <= result[index].start {
+                result[index] = ranges[index]
+            }
+        }
+        return result
+    }
+
+    private static func quietestTime(
+        near time: TimeInterval,
+        input: AVAudioFile,
+        format: AVAudioFormat
+    ) -> TimeInterval {
+        let radius = max(1, AVAudioFramePosition(format.sampleRate * 0.006))
+        let center = AVAudioFramePosition(time * format.sampleRate)
+        let start = max(0, center - radius)
+        let end = min(input.length, center + radius + 1)
+        let count = end - start
+        guard count > 1,
+              count <= AVAudioFramePosition(UInt32.max),
+              let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(count)) else {
+            return time
+        }
+        do {
+            input.framePosition = start
+            try input.read(into: buffer, frameCount: AVAudioFrameCount(count))
+        } catch {
+            return time
+        }
+        guard let channels = buffer.floatChannelData, buffer.frameLength > 0 else { return time }
+        var bestFrame = 0
+        var bestMagnitude = Float.greatestFiniteMagnitude
+        for frame in 0..<Int(buffer.frameLength) {
+            var magnitude: Float = 0
+            for channel in 0..<Int(format.channelCount) {
+                magnitude += abs(channels[channel][frame])
+            }
+            if magnitude < bestMagnitude {
+                bestMagnitude = magnitude
+                bestFrame = frame
+            }
+        }
+        return Double(start + AVAudioFramePosition(bestFrame)) / format.sampleRate
     }
 
     private static func applyBoundaryFades(

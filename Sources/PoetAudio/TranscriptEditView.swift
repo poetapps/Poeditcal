@@ -104,7 +104,7 @@ private struct TranscriptPanel: View {
                         .foregroundStyle(PoetTheme.muted)
                     Spacer()
                     HeaderMetric(value: "\(model.removedWords)", label: "removed", color: PoetTheme.amber)
-                    HeaderMetric(value: String(format: "%.1fs", model.pauseDuration), label: "pauses", color: PoetTheme.sage)
+                    HeaderMetric(value: "\(model.compactedPauses)", label: "pauses", color: PoetTheme.sage)
                     Text("\(model.editedWordCount) / \(model.originalWordCount) words")
                         .font(PoetTheme.utility(9, weight: .semibold)).foregroundStyle(PoetTheme.faint)
                     Button("Apply suggestions") { model.applySuggestions() }
@@ -124,6 +124,11 @@ private struct TranscriptPanel: View {
                 .padding(20)
 
                 Rectangle().fill(PoetTheme.divider).frame(height: 1)
+
+                if !model.pauseDecisions.isEmpty {
+                    PauseReviewStrip()
+                    Rectangle().fill(PoetTheme.divider).frame(height: 1)
+                }
 
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 24) {
@@ -385,6 +390,19 @@ private struct PlayerBar: View {
                 .font(.system(size: 10, weight: .medium, design: .monospaced))
                 .foregroundStyle(PoetTheme.muted)
 
+            if model.firstPassAudioURL != nil {
+                HStack(spacing: 2) {
+                    ForEach(EditPreviewMode.allCases) { mode in
+                        Button(mode.rawValue) { model.selectEditPreview(mode) }
+                            .buttonStyle(EditPreviewChoiceStyle(selected: model.editPreviewMode == mode))
+                    }
+                }
+                .padding(3)
+                .background(PoetTheme.elevated)
+                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                .help(model.firstPassStatus ?? "Compare the untouched source with the timing-aligned first pass")
+            }
+
             WaveformScrubber()
                 .frame(height: 38)
 
@@ -397,6 +415,59 @@ private struct PlayerBar: View {
     private func time(_ duration: TimeInterval) -> String {
         guard duration.isFinite else { return "0:00" }
         return String(format: "%d:%02d", Int(duration) / 60, Int(duration) % 60)
+    }
+}
+
+private struct PauseReviewStrip: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Label("Confirmed pauses", systemImage: "waveform.badge.magnifyingglass")
+                .font(PoetTheme.utility(9, weight: .semibold))
+                .foregroundStyle(PoetTheme.muted)
+                .fixedSize()
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 7) {
+                    ForEach(model.pauseDecisions) { pause in
+                        Button { model.togglePauseProtection(pause) } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: pause.isProtected ? "lock.fill" : "arrow.right")
+                                Text(pause.isProtected
+                                     ? String(format: "Keep %.1fs", pause.originalDuration)
+                                     : String(format: "%.1fs → %.1fs", pause.originalDuration, min(pause.originalDuration, model.pauseDuration)))
+                            }
+                            .font(PoetTheme.utility(9, weight: .semibold))
+                            .foregroundStyle(pause.isProtected ? PoetTheme.muted : PoetTheme.sage)
+                            .padding(.horizontal, 10)
+                            .frame(height: 28)
+                            .background((pause.isProtected ? PoetTheme.elevated : PoetTheme.sageDark).opacity(0.95))
+                            .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .help("\(pause.reason) · \(Int(pause.confidence * 100))% confidence. Click to \(pause.isProtected ? "compact" : "protect") this pause.")
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 10)
+    }
+}
+
+private struct EditPreviewChoiceStyle: ButtonStyle {
+    let selected: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(PoetTheme.utility(9, weight: .semibold))
+            .foregroundStyle(selected ? PoetTheme.background : PoetTheme.muted)
+            .padding(.horizontal, 9)
+            .frame(height: 26)
+            .background(selected ? PoetTheme.sage : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .opacity(configuration.isPressed ? 0.8 : 1)
     }
 }
 

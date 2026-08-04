@@ -6,11 +6,12 @@ extension UTType {
 }
 
 struct PoetProjectSnapshot: Codable, Equatable, Sendable {
-    static let currentVersion = 1
+    static let currentVersion = 2
 
     var version = currentVersion
     var projectName: String
     var sourceAudioFile: String
+    var firstPassAudioFile: String? = nil
     var sourceDisplayName: String
     var phase: WorkflowPhase
     var editingMode: EditingMode
@@ -19,11 +20,13 @@ struct PoetProjectSnapshot: Codable, Equatable, Sendable {
     var pauseDuration: Double? = nil
     var duration: TimeInterval
     var words: [TranscriptWord]
+    var pauseDecisions: [PauseEditDecision]? = nil
     var polishSelections: Set<PolishOption>
     var polishIntensities: [PolishOption: PolishIntensity]? = nil
     var usePolish: Bool
     var loudnessPreset: LoudnessPreset
     var exportAudio: Bool
+    var exportOriginal: Bool? = nil
     var exportTXT: Bool
     var exportSRT: Bool
     var exportVTT: Bool
@@ -52,6 +55,7 @@ enum PoetProjectStore {
     static func save(
         snapshot: PoetProjectSnapshot,
         sourceAudioURL: URL,
+        firstPassAudioURL: URL? = nil,
         to requestedURL: URL
     ) throws -> URL {
         let destination = requestedURL.pathExtension.lowercased() == "poe"
@@ -68,6 +72,13 @@ enum PoetProjectStore {
         do {
             let audioDestination = staging.appendingPathComponent(snapshot.sourceAudioFile)
             try manager.copyItem(at: sourceAudioURL, to: audioDestination)
+            if let firstPassAudioFile = snapshot.firstPassAudioFile,
+               let firstPassAudioURL {
+                try manager.copyItem(
+                    at: firstPassAudioURL,
+                    to: staging.appendingPathComponent(firstPassAudioFile)
+                )
+            }
 
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -87,7 +98,11 @@ enum PoetProjectStore {
         return destination
     }
 
-    static func load(from packageURL: URL) throws -> (snapshot: PoetProjectSnapshot, audioURL: URL) {
+    static func load(from packageURL: URL) throws -> (
+        snapshot: PoetProjectSnapshot,
+        audioURL: URL,
+        firstPassAudioURL: URL?
+    ) {
         let manifestURL = packageURL.appendingPathComponent(manifestName)
         guard FileManager.default.fileExists(atPath: manifestURL.path) else {
             throw PoetProjectError.missingManifest
@@ -100,6 +115,8 @@ enum PoetProjectStore {
         guard FileManager.default.fileExists(atPath: audioURL.path) else {
             throw PoetProjectError.missingAudio(snapshot.sourceAudioFile)
         }
-        return (snapshot, audioURL)
+        let firstPassAudioURL = snapshot.firstPassAudioFile.map { packageURL.appendingPathComponent($0) }
+            .flatMap { FileManager.default.fileExists(atPath: $0.path) ? $0 : nil }
+        return (snapshot, audioURL, firstPassAudioURL)
     }
 }

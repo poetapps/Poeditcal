@@ -10,10 +10,19 @@ final class EngineTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: folder) }
 
         let source = folder.appendingPathComponent("take.wav")
+        let firstPass = folder.appendingPathComponent("first-pass.wav")
         try makeTone(at: source, duration: 0.2)
+        try makeTone(at: firstPass, duration: 0.2)
+        let pauseDecision = PauseEditDecision(
+            sourceStart: 0.1,
+            sourceEnd: 0.18,
+            confidence: 0.94,
+            reason: "Confirmed silent pause"
+        )
         let snapshot = PoetProjectSnapshot(
             projectName: "First draft",
             sourceAudioFile: "Source Audio.wav",
+            firstPassAudioFile: "Analysis First Pass.wav",
             sourceDisplayName: "take.wav",
             phase: .edit,
             editingMode: .autopilot,
@@ -21,6 +30,7 @@ final class EngineTests: XCTestCase {
             pacing: .natural,
             duration: 0.2,
             words: [word("Keep", 0, 0.1), word("cut", 0.1, 0.2, removed: true)],
+            pauseDecisions: [pauseDecision],
             polishSelections: Set(PolishOption.allCases),
             polishIntensities: [
                 .noise: .strong,
@@ -32,6 +42,7 @@ final class EngineTests: XCTestCase {
             usePolish: true,
             loudnessPreset: .podcast,
             exportAudio: true,
+            exportOriginal: true,
             exportTXT: true,
             exportSRT: false,
             exportVTT: false
@@ -40,6 +51,7 @@ final class EngineTests: XCTestCase {
         let package = try PoetProjectStore.save(
             snapshot: snapshot,
             sourceAudioURL: source,
+            firstPassAudioURL: firstPass,
             to: folder.appendingPathComponent("First draft.poe")
         )
         let loaded = try PoetProjectStore.load(from: package)
@@ -48,11 +60,18 @@ final class EngineTests: XCTestCase {
         XCTAssertEqual(loaded.snapshot.polishIntensities?[.compression], .light)
         XCTAssertEqual(loaded.snapshot.polishIntensities?[.breathControl], .maximum)
         XCTAssertTrue(FileManager.default.fileExists(atPath: loaded.audioURL.path))
+        XCTAssertNotNil(loaded.firstPassAudioURL)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: loaded.firstPassAudioURL!.path))
         XCTAssertEqual(loaded.audioURL.lastPathComponent, "Source Audio.wav")
 
         var revised = snapshot
         revised.projectName = "Second draft"
-        _ = try PoetProjectStore.save(snapshot: revised, sourceAudioURL: loaded.audioURL, to: package)
+        _ = try PoetProjectStore.save(
+            snapshot: revised,
+            sourceAudioURL: loaded.audioURL,
+            firstPassAudioURL: loaded.firstPassAudioURL,
+            to: package
+        )
         XCTAssertEqual(try PoetProjectStore.load(from: package).snapshot.projectName, "Second draft")
     }
 
@@ -112,9 +131,65 @@ final class EngineTests: XCTestCase {
         let words = tokens.map { $0.text.lowercased().trimmingCharacters(in: .punctuationCharacters) }
 
         XCTAssertFalse(removed.contains(0), "A partial repeated opening should stay protected.")
-        XCTAssertTrue(removed.contains(words.firstIndex(of: "mean")!))
+        XCTAssertFalse(removed.contains(words.firstIndex(of: "mean")!), "Contextual phrases must not be removed by the fallback rules.")
         XCTAssertTrue(removed.contains(words.firstIndex(of: "you")!))
         XCTAssertTrue(removed.contains(words.lastIndex(of: "yeah")!))
+    }
+
+    func testFallbackAnalyzerProtectsIntentionalIMean() {
+        let text = "I mean what am I supposed to do right?"
+        let tokens = text.split(separator: " ").enumerated().map { index, word in
+            TranscribedToken(text: String(word), startTime: Double(index) * 0.25, duration: 0.19, confidence: 0.94)
+        }
+
+        let removed = Set(AutoEditAnalyzer.suggestions(for: tokens).flatMap { Array($0.range) })
+
+        XCTAssertFalse(removed.contains(0))
+        XCTAssertFalse(removed.contains(1))
+    }
+
+    func testSmartEditValidatorAcceptsHighConfidenceCorrection() {
+        let deletion = ContextualEditDeletion(
+            startToken: 0,
+            endToken: 4,
+            kind: "correction",
+            reason: "The speaker replaced the earlier time.",
+            confidence: 0.97
+        )
+
+        let suggestions = SmartEditModelStore.validatedSuggestions(
+            [deletion],
+            tokenCount: 8,
+            configuration: AutoEditConfiguration()
+        )
+
+        XCTAssertEqual(suggestions.count, 1)
+        XCTAssertEqual(suggestions.first?.range, 0...4)
+        XCTAssertEqual(suggestions.first?.reason, .correction)
+    }
+
+    func testSmartEditValidatorRejectsUnsafeAndDisabledRanges() {
+        let candidates = [
+            ContextualEditDeletion(startToken: 0, endToken: 7, kind: "correction", reason: "Deletes everything", confidence: 0.99),
+            ContextualEditDeletion(startToken: 1, endToken: 2, kind: "correction", reason: "Too uncertain", confidence: 0.4),
+            ContextualEditDeletion(startToken: 2, endToken: 3, kind: "filler", reason: "Disabled category", confidence: 0.99)
+        ]
+        var configuration = AutoEditConfiguration()
+        configuration.removeFillers = false
+
+        let suggestions = SmartEditModelStore.validatedSuggestions(
+            candidates,
+            tokenCount: 8,
+            configuration: configuration
+        )
+
+        XCTAssertTrue(suggestions.isEmpty)
+    }
+
+    func testSmartEditModelChoicesUseSeparateLocalModels() {
+        XCTAssertEqual(SmartEditModelChoice.fast.repoID, "mlx-community/Qwen3-0.6B-4bit")
+        XCTAssertEqual(SmartEditModelChoice.reliable.repoID, "mlx-community/Qwen3-1.7B-4bit")
+        XCTAssertNotEqual(SmartEditModelChoice.fast.repoID, SmartEditModelChoice.reliable.repoID)
     }
 
     func testAutoEditCategoryTogglesAreHonored() {
@@ -134,6 +209,34 @@ final class EngineTests: XCTestCase {
         XCTAssertFalse(suggestions.contains { $0.reason == .filler })
         XCTAssertFalse(suggestions.contains { $0.reason == .earlierTake })
         XCTAssertTrue(suggestions.contains { $0.reason == .restart })
+    }
+
+    func testAutoEditFindsFuzzyRetakeWithOneInsertedWord() {
+        let text = "I wanted to explain the simple idea clearly. Sorry let me try again. I wanted to explain this simple idea clearly."
+        let tokens = text.split(separator: " ").enumerated().map { index, word in
+            TranscribedToken(text: String(word), startTime: Double(index) * 0.28, duration: 0.2, confidence: 0.91)
+        }
+
+        let suggestions = AutoEditAnalyzer.suggestions(for: tokens)
+        let removed = Set(suggestions.flatMap { Array($0.range) })
+        let normalized = tokens.map { $0.text.lowercased().trimmingCharacters(in: .punctuationCharacters) }
+        let firstTake = normalized.firstIndex(of: "wanted")!
+        let secondTake = normalized.lastIndex(of: "wanted")!
+
+        XCTAssertTrue(removed.contains(firstTake), "The interrupted fuzzy match should be suggested.")
+        XCTAssertFalse(removed.contains(secondTake), "The complete later take should remain.")
+        XCTAssertTrue(suggestions.contains { $0.reason == .earlierTake && $0.confidence >= 0.8 })
+    }
+
+    func testLegitimateAgainAtSentenceOpeningIsNotARestart() {
+        let text = "Again, this distinction matters for the final result."
+        let tokens = text.split(separator: " ").enumerated().map { index, word in
+            TranscribedToken(text: String(word), startTime: Double(index) * 0.3, duration: 0.22, confidence: 0.9)
+        }
+
+        let suggestions = AutoEditAnalyzer.suggestions(for: tokens)
+
+        XCTAssertFalse(suggestions.contains { $0.reason == .restart })
     }
 
     func testEditPlannerRemovesWordsAndShortensLongPauses() {
@@ -180,6 +283,129 @@ final class EngineTests: XCTestCase {
         XCTAssertFalse(kept.contains { $0.start < 0.8 && $0.end > 0.9 })
     }
 
+    func testExplicitEmptyPauseAnalysisDoesNotBlindlyTrimTranscriptGap() {
+        let words = [
+            word("First", 0.2, 0.5),
+            word("Next", 2.0, 2.3)
+        ]
+
+        let kept = AudioEditPlanner.keptRanges(
+            words: words,
+            duration: 2.5,
+            maximumPause: 0.7,
+            pauseDecisions: []
+        )
+        let firstEnd = AudioEditPlanner.editedTime(for: words[0].endTime, keptRanges: kept)
+        let nextStart = AudioEditPlanner.editedTime(for: words[1].startTime, keptRanges: kept)
+
+        XCTAssertEqual(nextStart - firstEnd, 1.5, accuracy: 0.001)
+    }
+
+    func testTightPauseSettingHonorsCapWhenAcousticAnalysisIsInconclusive() {
+        let words = [word("First", 0.2, 0.5), word("Next", 2.0, 2.3)]
+
+        let kept = AudioEditPlanner.keptRanges(
+            words: words,
+            duration: 2.5,
+            maximumPause: 0.2,
+            pauseDecisions: []
+        )
+        let firstEnd = AudioEditPlanner.editedTime(for: 0.5, keptRanges: kept)
+        let nextStart = AudioEditPlanner.editedTime(for: 2.0, keptRanges: kept)
+
+        XCTAssertEqual(nextStart - firstEnd, 0.2, accuracy: 0.001)
+    }
+
+    func testRemovedPhraseRecomputesRetainedBoundaryWithExplicitPauseAnalysis() {
+        let words = [
+            word("Keep", 0.2, 0.5),
+            word("remove", 0.8, 1.2, removed: true),
+            word("this", 1.4, 1.8, removed: true),
+            word("Next", 3.0, 3.3)
+        ]
+
+        let kept = AudioEditPlanner.keptRanges(
+            words: words,
+            duration: 3.5,
+            maximumPause: 0.7,
+            pauseDecisions: []
+        )
+        let keepEnd = AudioEditPlanner.editedTime(for: 0.5, keptRanges: kept)
+        let nextStart = AudioEditPlanner.editedTime(for: 3.0, keptRanges: kept)
+
+        XCTAssertLessThanOrEqual(nextStart - keepEnd, 0.7 + 0.001)
+        XCTAssertGreaterThan(nextStart - keepEnd, 0)
+    }
+
+    func testPauseAnalyzerConfirmsSilenceAndRejectsUntranscribedAudio() {
+        let sampleRate = 16_000.0
+        let words = [
+            word("First.", 0.1, 0.6),
+            word("Next", 2.0, 2.5)
+        ]
+        var quietSamples = [Float](repeating: 0.002, count: Int(sampleRate * 2.6))
+        addSine(to: &quietSamples, sampleRate: sampleRate, range: 0.1..<0.6, amplitude: 0.2)
+        addSine(to: &quietSamples, sampleRate: sampleRate, range: 2.0..<2.5, amplitude: 0.2)
+
+        let confirmed = PauseAnalyzer.analyze(
+            samples: quietSamples,
+            sampleRate: sampleRate,
+            words: words,
+            maximumPause: 0.7
+        )
+        XCTAssertEqual(confirmed.count, 1)
+        XCTAssertGreaterThanOrEqual(confirmed[0].confidence, 0.8)
+
+        var eventSamples = quietSamples
+        addSine(to: &eventSamples, sampleRate: sampleRate, range: 1.05..<1.35, amplitude: 0.12)
+        let rejected = PauseAnalyzer.analyze(
+            samples: eventSamples,
+            sampleRate: sampleRate,
+            words: words,
+            maximumPause: 0.7
+        )
+        XCTAssertTrue(rejected.isEmpty, "A missed word, laugh, or other event must protect the gap.")
+    }
+
+    func testProtectedPauseStaysAtOriginalDuration() {
+        let words = [word("First", 0.2, 0.5), word("Next", 2.0, 2.3)]
+        let pause = PauseEditDecision(
+            sourceStart: 0.5,
+            sourceEnd: 2.0,
+            confidence: 0.95,
+            reason: "Confirmed silent pause",
+            isProtected: true
+        )
+        let kept = AudioEditPlanner.keptRanges(
+            words: words,
+            duration: 2.5,
+            maximumPause: 0.7,
+            pauseDecisions: [pause]
+        )
+
+        let firstEnd = AudioEditPlanner.editedTime(for: 0.5, keptRanges: kept)
+        let nextStart = AudioEditPlanner.editedTime(for: 2.0, keptRanges: kept)
+        XCTAssertEqual(nextStart - firstEnd, 1.5, accuracy: 0.001)
+    }
+
+    func testAnalysisFirstPassIsExactlyTimelineAligned() throws {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PoetFirstPassTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let source = folder.appendingPathComponent("source.wav")
+        let firstPass = folder.appendingPathComponent("first-pass.wav")
+        try makeTone(at: source, duration: 0.8)
+
+        let report = try AnalysisFirstPassRenderer.render(sourceURL: source, destinationURL: firstPass)
+        let original = try AVAudioFile(forReading: source)
+        let processed = try AVAudioFile(forReading: firstPass)
+
+        XCTAssertEqual(processed.processingFormat.sampleRate, original.processingFormat.sampleRate)
+        XCTAssertEqual(processed.length, original.length)
+        XCTAssertEqual(report.frameAlignmentError, 0, accuracy: 1 / original.processingFormat.sampleRate)
+    }
+
     func testSpeechTimingRefinerRemovesDecoderBlankFramesFromWordEnd() {
         let sampleRate = 16_000.0
         var samples = [Float](repeating: 0.002, count: Int(sampleRate * 1.4))
@@ -211,6 +437,43 @@ final class EngineTests: XCTestCase {
         let refined = SpeechTimingRefiner.refine(tokens, samples: samples, sampleRate: sampleRate)
 
         XCTAssertLessThan(refined[0].startTime + refined[0].duration, 0.5)
+    }
+
+    func testSpeechTimingRefinerRemovesTrailingBlankFramesFromFinalWord() {
+        let sampleRate = 16_000.0
+        var samples = [Float](repeating: 0.002, count: Int(sampleRate * 1.4))
+        addSine(to: &samples, sampleRate: sampleRate, range: 0.15..<0.48, amplitude: 0.2)
+        let token = TranscribedToken(text: "Finally", startTime: 0.15, duration: 1.0, confidence: 0.9)
+
+        let refined = SpeechTimingRefiner.refine([token], samples: samples, sampleRate: sampleRate)
+
+        XCTAssertEqual(refined[0].startTime + refined[0].duration, 0.52, accuracy: 0.05)
+    }
+
+    func testTranscriptionMergerRecoversOnlyMissingHesitations() {
+        let primary = [
+            TranscribedToken(text: "This", startTime: 0.1, duration: 0.3, confidence: 0.9),
+            TranscribedToken(text: "works", startTime: 1.0, duration: 0.3, confidence: 0.9)
+        ]
+        let original = [
+            TranscribedToken(text: "This", startTime: 0.1, duration: 0.3, confidence: 0.88),
+            TranscribedToken(text: "um", startTime: 0.58, duration: 0.24, confidence: 0.88),
+            TranscribedToken(text: "works", startTime: 1.0, duration: 0.3, confidence: 0.88)
+        ]
+
+        let merged = TranscriptionMerger.recoverHesitations(primary: primary, original: original)
+
+        XCTAssertEqual(merged.map(\.text), ["This", "um", "works"])
+    }
+
+    func testTranscriptionMergerDoesNotDuplicateExistingHesitation() {
+        let primary = [TranscribedToken(text: "Um", startTime: 0.5, duration: 0.2, confidence: 0.9)]
+        let original = [TranscribedToken(text: "um", startTime: 0.54, duration: 0.22, confidence: 0.85)]
+
+        XCTAssertEqual(
+            TranscriptionMerger.recoverHesitations(primary: primary, original: original).count,
+            1
+        )
     }
 
     func testEditPlannerTrimsRecordingEdgesFromTranscriptWithSafetyBuffer() {
@@ -431,6 +694,7 @@ final class EngineTests: XCTestCase {
             duration: sourceDuration,
             renderOptions: renderOptions,
             includeAudio: true,
+            includeOriginal: true,
             includeTXT: true,
             includeSRT: true,
             includeVTT: true
@@ -438,6 +702,7 @@ final class EngineTests: XCTestCase {
 
         let exported = try ExportPackageRenderer.render(request)
         let finishedAudio = exported.appendingPathComponent("integration-finished.wav")
+        let originalAudio = exported.appendingPathComponent("integration-original.m4a")
         let output = try AVAudioFile(forReading: finishedAudio)
         let outputDuration = Double(output.length) / output.processingFormat.sampleRate
         let sourceLoudness = try LoudnessAnalyzer.measure(url: source)
@@ -448,6 +713,7 @@ final class EngineTests: XCTestCase {
         let webVTT = try String(contentsOf: exported.appendingPathComponent("integration.vtt"), encoding: .utf8)
 
         XCTAssertEqual(transcript, "Keep Finish")
+        XCTAssertEqual(try Data(contentsOf: originalAudio), try Data(contentsOf: source))
         XCTAssertFalse(subtitles.contains("remove"))
         XCTAssertTrue(webVTT.hasPrefix("WEBVTT\n\n"))
         XCTAssertGreaterThan(outputDuration, 0)
