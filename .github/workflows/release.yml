@@ -91,9 +91,24 @@ jobs:
             CODE_SIGN_IDENTITY="$SIGNING_IDENTITY" \
             OTHER_CODE_SIGN_FLAGS="--timestamp"
 
+      - name: Export Developer ID app
+        run: |
+          EXPORT_OPTIONS="$RUNNER_TEMP/ExportOptions.plist"
+          plutil -create xml1 "$EXPORT_OPTIONS"
+          plutil -insert destination -string export "$EXPORT_OPTIONS"
+          plutil -insert method -string developer-id "$EXPORT_OPTIONS"
+          plutil -insert signingCertificate -string "Developer ID Application" "$EXPORT_OPTIONS"
+          plutil -insert signingStyle -string manual "$EXPORT_OPTIONS"
+          plutil -insert teamID -string "$APPLE_TEAM_ID" "$EXPORT_OPTIONS"
+
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/PoetAudio.xcarchive" \
+            -exportPath "$RUNNER_TEMP/export" \
+            -exportOptionsPlist "$EXPORT_OPTIONS"
+
       - name: Verify signed app
         run: |
-          APP_PATH="$RUNNER_TEMP/PoetAudio.xcarchive/Products/Applications/Poet Audio.app"
+          APP_PATH="$RUNNER_TEMP/export/Poet Audio.app"
           test -d "$APP_PATH"
           codesign --verify --deep --strict --verbose=2 "$APP_PATH"
           test -d "$APP_PATH/Contents/Frameworks/Sparkle.framework"
@@ -106,13 +121,24 @@ jobs:
           test "$APP_TEAM_ID" = "$APPLE_TEAM_ID"
           test "$SPARKLE_TEAM_ID" = "$APPLE_TEAM_ID"
 
+          for COMPONENT in \
+            "$APP_PATH/Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app" \
+            "$APP_PATH/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate" \
+            "$APP_PATH/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc" \
+            "$APP_PATH/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc"; do
+            codesign --verify --strict --verbose=2 "$COMPONENT"
+            COMPONENT_TEAM_ID="$(codesign -dv --verbose=4 "$COMPONENT" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+            test "$COMPONENT_TEAM_ID" = "$APPLE_TEAM_ID"
+            codesign -dv --verbose=4 "$COMPONENT" 2>&1 | grep -q '^Timestamp='
+          done
+
       - name: Notarize app
         env:
           API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
           API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
         run: |
-          APP_PATH="$RUNNER_TEMP/PoetAudio.xcarchive/Products/Applications/Poet Audio.app"
+          APP_PATH="$RUNNER_TEMP/export/Poet Audio.app"
           API_KEY_PATH="$RUNNER_TEMP/AuthKey_${API_KEY_ID}.p8"
           NOTARY_ZIP="$RUNNER_TEMP/Poet-Audio-notary.zip"
 
@@ -132,7 +158,7 @@ jobs:
           API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          APP_PATH="$RUNNER_TEMP/PoetAudio.xcarchive/Products/Applications/Poet Audio.app"
+          APP_PATH="$RUNNER_TEMP/export/Poet Audio.app"
           DMG_PATH="$RUNNER_TEMP/Poet-Audio-${VERSION}.dmg"
           API_KEY_PATH="$RUNNER_TEMP/AuthKey_${API_KEY_ID}.p8"
 
