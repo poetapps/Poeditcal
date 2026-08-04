@@ -11,6 +11,10 @@ let package = Package(
         .package(
             url: "https://github.com/FluidInference/FluidAudio.git",
             revision: "372eb32a3b23342d11dca41ed75cd4d11d3f8955"
+        ),
+        .package(
+            url: "https://github.com/sparkle-project/Sparkle.git",
+            exact: "2.9.2"
         )
     ],
     targets: [
@@ -22,12 +26,10 @@ let package = Package(
             name: "PoetAudio",
             dependencies: [
                 .product(name: "FluidAudio", package: "FluidAudio"),
+                .product(name: "Sparkle", package: "Sparkle"),
                 "PoetDenoise"
             ],
             path: "Sources/PoetAudio",
-            resources: [
-                .process("../../Resources")
-            ],
             linkerSettings: [
                 .linkedLibrary("c++"),
                 .linkedFramework("Accelerate"),

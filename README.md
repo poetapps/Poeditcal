@@ -6,9 +6,9 @@ Poet Audio is a local-first macOS voice editor. Drop in a recording, edit it by 
 
 - Apple silicon Mac
 - macOS 15 or newer
-- Internet access on first transcription only, for the approximately 450 MB Parakeet model download
+- Internet access for optional local model downloads
 
-The English Parakeet TDT v2 Core ML model is cached under `~/Library/Application Support/FluidAudio/Models`. The DPDFNet2 denoiser ships inside the app and runs locally. Recordings and transcripts are not uploaded.
+The English Parakeet TDT v2 Core ML model is cached under `~/Library/Application Support/FluidAudio/Models`. Poet offers the 10.6 MB DPDFNet2 noise-reduction model as a verified one-time download and stores it under `~/Library/Application Support/Poet Audio/Models`. Noise reduction stays disabled until that model is installed. Recordings and transcripts are not uploaded.
 
 ## Build and run
 
@@ -20,7 +20,7 @@ Open `PoetAudio.xcodeproj`, select the shared **PoetAudio** scheme and **My Mac*
 - **⌘U** to run the XCTest suite
 - **Product → Archive** for a release archive
 
-Xcode resolves FluidAudio automatically through Swift Package Manager. The project targets Apple-silicon Macs and keeps `Package.swift` available for command-line and CI builds.
+Xcode resolves FluidAudio and Sparkle automatically through Swift Package Manager. The project targets Apple-silicon Macs and keeps `Package.swift` available for command-line and CI builds.
 
 ### Command line
 
@@ -35,20 +35,20 @@ To create a release app bundle:
 open .build/PoetAudio.app
 ```
 
-The local bundle is ad-hoc signed. Public distribution will additionally require an Apple Developer ID signature and notarization.
+The local bundle is ad-hoc signed. Public releases are Developer ID signed, Apple-notarized, distributed as a DMG, and updated through Sparkle. See [RELEASING.md](RELEASING.md) for the release workflow and one-time credential setup.
 
 ## Tests
 
 ```sh
-swift test --disable-sandbox
+./Scripts/test.sh
 ```
 
-The test suite covers retake suggestions, edit planning, synchronized subtitle remapping, adaptive voice processing, subtle breath attenuation, audio rendering, and project persistence. Tests that require local audio fixtures or downloaded models are skipped automatically when those resources are unavailable.
+The wrapper places Sparkle's binary framework on SwiftPM's test runtime path before launching the suite. Tests cover retake suggestions, edit planning, synchronized subtitle remapping, adaptive voice processing, subtle breath attenuation, audio rendering, and project persistence. Tests that require local audio fixtures or downloaded models are skipped automatically when those resources are unavailable.
 
 ## Architecture
 
 - **FluidAudio + Parakeet TDT v2/Core ML:** high-recall local English transcription with word timestamps and a one-time model download
-- **DPDFNet2 48 kHz HR + sherpa-onnx:** bundled, full-band local speech enhancement that removes room and fan noise underneath speech
+- **DPDFNet2 48 kHz HR + sherpa-onnx:** optional, downloadable full-band local speech enhancement that removes room and fan noise underneath speech
 - **Transcript edit plan:** reversible word removals and configurable pause compaction
 - **AVFoundation:** non-destructive preview, offline rendering, resampling, EQ, de-essing, conservative compression, subtle breath control, and optional mono downmix
 - **Measured mastering:** gated K-weighted integrated-loudness analysis, selectable LUFS delivery presets, soft peak limiting, and iterative normalization

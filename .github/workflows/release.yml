@@ -1,0 +1,206 @@
+name: Release Poet Audio
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: poet-audio-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Sign, notarize, and publish
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@v4
+
+      - name: Validate release metadata
+        run: ./Scripts/validate-release.sh "$GITHUB_REF_NAME"
+
+      - name: Run test suite
+        run: ./Scripts/test.sh
+
+      - name: Validate required secrets
+        env:
+          CERTIFICATE_P12: ${{ secrets.DEVELOPER_ID_CERTIFICATE_P12 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+          API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          for name in CERTIFICATE_P12 CERTIFICATE_PASSWORD API_KEY_P8 API_KEY_ID API_ISSUER_ID APPLE_TEAM_ID SPARKLE_PRIVATE_KEY; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "Missing required GitHub secret: $name" >&2
+              exit 1
+            fi
+          done
+
+      - name: Import Developer ID certificate
+        env:
+          CERTIFICATE_P12: ${{ secrets.DEVELOPER_ID_CERTIFICATE_P12 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/poet-audio-signing.keychain-db"
+          CERTIFICATE_PATH="$RUNNER_TEMP/developer-id.p12"
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 32)"
+
+          printf '%s' "$CERTIFICATE_P12" | base64 -D > "$CERTIFICATE_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" -k "$KEYCHAIN_PATH" -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+
+          SIGNING_IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | sed -n 's/.*"\(Developer ID Application:.*\)"/\1/p' | head -n 1)"
+          if [[ -z "$SIGNING_IDENTITY" ]]; then
+            echo "The certificate does not contain a Developer ID Application identity." >&2
+            exit 1
+          fi
+          echo "SIGNING_IDENTITY=$SIGNING_IDENTITY" >> "$GITHUB_ENV"
+
+      - name: Resolve Swift packages
+        run: |
+          swift package resolve
+          xcodebuild -resolvePackageDependencies -project PoetAudio.xcodeproj -scheme PoetAudio
+
+      - name: Archive signed app
+        run: |
+          xcodebuild archive \
+            -project PoetAudio.xcodeproj \
+            -scheme PoetAudio \
+            -configuration Release \
+            -destination 'generic/platform=macOS' \
+            -archivePath "$RUNNER_TEMP/PoetAudio.xcarchive" \
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="$SIGNING_IDENTITY" \
+            OTHER_CODE_SIGN_FLAGS="--timestamp"
+
+      - name: Verify signed app
+        run: |
+          APP_PATH="$RUNNER_TEMP/PoetAudio.xcarchive/Products/Applications/Poet Audio.app"
+          test -d "$APP_PATH"
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+          test -d "$APP_PATH/Contents/Frameworks/Sparkle.framework"
+
+      - name: Notarize app
+        env:
+          API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          APP_PATH="$RUNNER_TEMP/PoetAudio.xcarchive/Products/Applications/Poet Audio.app"
+          API_KEY_PATH="$RUNNER_TEMP/AuthKey_${API_KEY_ID}.p8"
+          NOTARY_ZIP="$RUNNER_TEMP/Poet-Audio-notary.zip"
+
+          printf '%s' "$API_KEY_P8" | base64 -D > "$API_KEY_PATH"
+          ditto -c -k --keepParent "$APP_PATH" "$NOTARY_ZIP"
+          xcrun notarytool submit "$NOTARY_ZIP" \
+            --key "$API_KEY_PATH" \
+            --key-id "$API_KEY_ID" \
+            --issuer "$API_ISSUER_ID" \
+            --wait
+          xcrun stapler staple "$APP_PATH"
+          xcrun stapler validate "$APP_PATH"
+
+      - name: Create, sign, and notarize DMG
+        env:
+          API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          APP_PATH="$RUNNER_TEMP/PoetAudio.xcarchive/Products/Applications/Poet Audio.app"
+          DMG_PATH="$RUNNER_TEMP/Poet-Audio-${VERSION}.dmg"
+          API_KEY_PATH="$RUNNER_TEMP/AuthKey_${API_KEY_ID}.p8"
+
+          ./Scripts/create-dmg.sh "$APP_PATH" "$DMG_PATH"
+          codesign --force --timestamp --sign "$SIGNING_IDENTITY" "$DMG_PATH"
+          codesign --verify --verbose=2 "$DMG_PATH"
+          xcrun notarytool submit "$DMG_PATH" \
+            --key "$API_KEY_PATH" \
+            --key-id "$API_KEY_ID" \
+            --issuer "$API_ISSUER_ID" \
+            --wait
+          xcrun stapler staple "$DMG_PATH"
+          xcrun stapler validate "$DMG_PATH"
+          spctl --assess --type open --context context:primary-signature --verbose=2 "$DMG_PATH"
+          echo "DMG_PATH=$DMG_PATH" >> "$GITHUB_ENV"
+
+      - name: Generate signed Sparkle appcast
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          UPDATE_DIR="$RUNNER_TEMP/sparkle-updates"
+          DOWNLOAD_PREFIX="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/"
+          mkdir -p "$UPDATE_DIR"
+          cp "$DMG_PATH" "$UPDATE_DIR/"
+          cp "ReleaseNotes/${VERSION}.md" "$UPDATE_DIR/Poet-Audio-${VERSION}.md"
+          if ! curl --fail --silent --show-error \
+            "https://poetapps.github.io/PoetAudio/appcast.xml" \
+            -o "$UPDATE_DIR/appcast.xml"; then
+            rm -f "$UPDATE_DIR/appcast.xml"
+          fi
+
+          printf '%s' "$SPARKLE_PRIVATE_KEY" | \
+            .build/artifacts/sparkle/Sparkle/bin/generate_appcast \
+              --ed-key-file - \
+              --download-url-prefix "$DOWNLOAD_PREFIX" \
+              --embed-release-notes \
+              --link "https://github.com/${GITHUB_REPOSITORY}/releases/latest" \
+              --maximum-versions 3 \
+              -o "$UPDATE_DIR/appcast.xml" \
+              "$UPDATE_DIR"
+
+          mkdir -p "$RUNNER_TEMP/pages"
+          cp "$UPDATE_DIR/appcast.xml" "$RUNNER_TEMP/pages/appcast.xml"
+          echo "PAGES_PATH=$RUNNER_TEMP/pages" >> "$GITHUB_ENV"
+
+      - name: Create GitHub release
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "$DMG_PATH#Poet Audio ${VERSION}" --clobber
+            gh release edit "$GITHUB_REF_NAME" \
+              --title "Poet Audio ${VERSION}" \
+              --notes-file "ReleaseNotes/${VERSION}.md"
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              "$DMG_PATH#Poet Audio ${VERSION}" \
+              --verify-tag \
+              --title "Poet Audio ${VERSION}" \
+              --notes-file "ReleaseNotes/${VERSION}.md"
+          fi
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload appcast site
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: ${{ env.PAGES_PATH }}
+
+  deploy-appcast:
+    name: Publish Sparkle appcast
+    needs: release
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy appcast to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

@@ -69,6 +69,21 @@ final class EngineTests: XCTestCase {
         XCTAssertEqual(audio?.path, "/tmp/take.m4a")
     }
 
+    func testDenoiseModelDownloadConfigurationIsPinnedAndVerifiable() throws {
+        XCTAssertEqual(DenoiseModelStore.remoteURL.scheme, "https")
+        XCTAssertTrue(DenoiseModelStore.remoteURL.path.contains("8e67a45bbd269bb530ff88a5c0fb69a7fd43db15"))
+        XCTAssertEqual(DenoiseModelStore.expectedSHA256.count, 64)
+
+        let fixture = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PoetChecksum-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: fixture) }
+        try Data("abc".utf8).write(to: fixture)
+        XCTAssertEqual(
+            try DenoiseModelStore.sha256Digest(of: fixture),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        )
+    }
+
     func testAutoEditFindsEarlierRepeatedTakeAndFiller() {
         let text = "Today we start. Um I think the best tools disappear. Sorry try again. The best tools disappear quickly."
         let tokens = text.split(separator: " ").enumerated().map { index, word in
@@ -399,7 +414,7 @@ final class EngineTests: XCTestCase {
         ]
         let renderOptions = AudioRenderOptions(
             pacing: .natural,
-            reduceNoise: true,
+            reduceNoise: false,
             voiceEQ: true,
             deEss: true,
             compression: true,

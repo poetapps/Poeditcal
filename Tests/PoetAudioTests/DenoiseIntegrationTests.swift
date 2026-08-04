@@ -3,9 +3,37 @@ import XCTest
 @testable import PoetAudio
 
 final class DenoiseIntegrationTests: XCTestCase {
+    @MainActor
+    func testModelDownloadsAndInstallsFromPinnedGitHubURL() async throws {
+        guard ProcessInfo.processInfo.environment["POET_RUN_MODEL_DOWNLOAD_TEST"] == "1" else {
+            throw XCTSkip("Set POET_RUN_MODEL_DOWNLOAD_TEST=1 to verify the real model download.")
+        }
+
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PoetModelDownload-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+
+        let store = DenoiseModelStore(installationDirectoryURL: folder)
+        XCTAssertFalse(store.isInstalled)
+        await store.install()
+
+        XCTAssertTrue(store.isInstalled, store.errorMessage ?? "Model was not installed")
+        XCTAssertEqual(
+            try DenoiseModelStore.sha256Digest(of: store.modelURL),
+            DenoiseModelStore.expectedSHA256
+        )
+        XCTAssertEqual(
+            try FileManager.default.attributesOfItem(atPath: store.modelURL.path)[.size] as? Int,
+            DenoiseModelStore.downloadSize
+        )
+    }
+
     func testNewTestFanNoiseFixture() throws {
         guard ProcessInfo.processInfo.environment["POET_RUN_DENOISE_FIXTURE"] == "1" else {
             throw XCTSkip("Set POET_RUN_DENOISE_FIXTURE=1 to run the supplied fan-noise regression fixture.")
+        }
+        guard DenoiseModelStore.installedModelIsValid() else {
+            throw XCTSkip("Install Poet AI Noise Reduction in the app before running this integration test.")
         }
 
         let source = URL(fileURLWithPath: "/Users/jonah/Downloads/newTest.m4a")

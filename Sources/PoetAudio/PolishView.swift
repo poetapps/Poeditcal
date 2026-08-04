@@ -116,10 +116,12 @@ private struct LoudnessSelector: View {
 
 private struct PolishOptionRow: View {
     @EnvironmentObject private var model: AppModel
+    @EnvironmentObject private var denoiseModel: DenoiseModelStore
     let option: PolishOption
 
     private var selected: Bool { model.polishSelections.contains(option) }
     private var supportsIntensity: Bool { option != .forceMono }
+    private var isAvailable: Bool { option != .noise || denoiseModel.isInstalled }
 
     var body: some View {
         HStack(spacing: 14) {
@@ -131,7 +133,7 @@ private struct PolishOptionRow: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(option.rawValue)
                     .font(PoetTheme.utility(12, weight: .semibold))
-                Text(shortDetail)
+                Text(option == .noise && !isAvailable ? "Download required · 10.6 MB" : shortDetail)
                     .font(PoetTheme.utility(9))
                     .foregroundStyle(PoetTheme.muted)
             }
@@ -155,7 +157,7 @@ private struct PolishOptionRow: View {
                     .tint(PoetTheme.sage)
                     .controlSize(.large)
                     .frame(width: 130)
-                    .disabled(!selected)
+                    .disabled(!selected || !isAvailable)
                     Text(model.polishIntensity(for: option).label)
                         .font(PoetTheme.utility(9, weight: .semibold))
                         .foregroundStyle(selected ? PoetTheme.sage : PoetTheme.faint)
@@ -163,13 +165,28 @@ private struct PolishOptionRow: View {
                 }
             }
 
-            Toggle("", isOn: Binding(
-                get: { selected },
-                set: { _ in model.togglePolish(option) }
-            ))
-            .labelsHidden()
-            .toggleStyle(.switch)
-            .tint(PoetTheme.sage)
+            if option == .noise && !isAvailable {
+                Button {
+                    Task { await denoiseModel.install() }
+                } label: {
+                    if denoiseModel.isDownloading {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Text(denoiseModel.errorMessage == nil ? "Download" : "Retry")
+                    }
+                }
+                .buttonStyle(SecondaryButtonStyle())
+                .disabled(denoiseModel.isDownloading)
+                .help(denoiseModel.errorMessage ?? "Install AI noise reduction")
+            } else {
+                Toggle("", isOn: Binding(
+                    get: { selected },
+                    set: { _ in model.togglePolish(option) }
+                ))
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .tint(PoetTheme.sage)
+            }
         }
         .padding(.horizontal, 18)
         .frame(minHeight: 68)

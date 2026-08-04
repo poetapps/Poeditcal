@@ -52,12 +52,15 @@ final class PoetAppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 @main
 struct PoetAudioApp: App {
     @StateObject private var model = AppModel()
+    @StateObject private var denoiseModel = DenoiseModelStore()
+    @StateObject private var updateController = UpdateController()
     @NSApplicationDelegateAdaptor(PoetAppDelegate.self) private var appDelegate
 
     var body: some Scene {
         WindowGroup {
             RootView()
                 .environmentObject(model)
+                .environmentObject(denoiseModel)
                 .environmentObject(appDelegate)
                 .preferredColorScheme(.dark)
                 .frame(minWidth: 980, minHeight: 680)
@@ -66,6 +69,12 @@ struct PoetAudioApp: App {
         .windowToolbarStyle(.unifiedCompact(showsTitle: false))
         .defaultSize(width: 1180, height: 780)
         .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") {
+                    updateController.checkForUpdates()
+                }
+                .disabled(!updateController.canCheckForUpdates)
+            }
             CommandGroup(after: .newItem) {
                 Button("Open Project…") { model.openProjectPanel() }
                     .keyboardShortcut("o")

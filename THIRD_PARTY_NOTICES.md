@@ -24,4 +24,4 @@ Licensed under the MIT License. Poet Audio statically links ONNX Runtime 1.24.4.
 
 ## DPDFNet2 48 kHz HR
 
-Poet Audio bundles the `dpdfnet2_48khz_hr.onnx` speech-enhancement model distributed by sherpa-onnx. Upstream project: <https://github.com/Ceva-IP/DPDFNet>.
+Poet Audio offers the `dpdfnet2_48khz_hr.onnx` speech-enhancement model distributed by sherpa-onnx as an optional, verified download. Upstream project: <https://github.com/Ceva-IP/DPDFNet>.

@@ -143,7 +143,9 @@ final class AppModel: ObservableObject {
     @Published var words: [TranscriptWord] = []
     @Published var currentTime: TimeInterval = 0
     @Published var isPlaying = false
-    @Published var polishSelections: Set<PolishOption> = Set(PolishOption.allCases)
+    @Published var polishSelections: Set<PolishOption> = Set(
+        PolishOption.allCases.filter { $0 != .noise || DenoiseModelStore.installedModelIsValid() }
+    )
     @Published var polishIntensities: [PolishOption: PolishIntensity] = AppModel.defaultPolishIntensities
     @Published var usePolish = true
     @Published var loudnessPreset: LoudnessPreset = .podcast
@@ -868,8 +870,16 @@ final class AppModel: ObservableObject {
     }
 
     func togglePolish(_ option: PolishOption) {
+        guard option != .noise || DenoiseModelStore.installedModelIsValid() else { return }
         if polishSelections.contains(option) { polishSelections.remove(option) }
         else { polishSelections.insert(option) }
+        markPolishChangesPending()
+    }
+
+    func enableNoiseReductionIfAvailable() {
+        guard DenoiseModelStore.installedModelIsValid(),
+              !polishSelections.contains(.noise) else { return }
+        polishSelections.insert(.noise)
         markPolishChangesPending()
     }
 
@@ -925,7 +935,9 @@ final class AppModel: ObservableObject {
         AudioRenderOptions(
             pacing: pacing,
             maximumPause: pauseDuration,
-            reduceNoise: usePolish && polishSelections.contains(.noise),
+            reduceNoise: usePolish
+                && polishSelections.contains(.noise)
+                && DenoiseModelStore.installedModelIsValid(),
             voiceEQ: usePolish && polishSelections.contains(.eq),
             deEss: usePolish && polishSelections.contains(.deEss),
             compression: usePolish && polishSelections.contains(.compression),

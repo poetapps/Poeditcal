@@ -3,6 +3,9 @@ import SwiftUI
 struct RootView: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var appDelegate: PoetAppDelegate
+    @EnvironmentObject private var denoiseModel: DenoiseModelStore
+    @AppStorage("hasSeenDenoiseModelOfferV1") private var hasSeenDenoiseModelOffer = false
+    @State private var showingDenoiseModelSetup = false
 
     private var showsWorkflowDock: Bool {
         (model.phase == .edit || model.phase == .polish || model.phase == .export) && !model.isPreparingPolishPreview
@@ -54,9 +57,23 @@ struct RootView: View {
         .onOpenURL { model.openURL($0) }
         .task {
             if let url = appDelegate.pendingOpenURL { model.openURL(url) }
+            if !hasSeenDenoiseModelOffer && !denoiseModel.isInstalled {
+                showingDenoiseModelSetup = true
+            }
         }
         .onChange(of: appDelegate.pendingOpenURL) { _, url in
             if let url { model.openURL(url) }
+        }
+        .onChange(of: denoiseModel.isInstalled) { _, installed in
+            guard installed else { return }
+            model.enableNoiseReductionIfAvailable()
+            showingDenoiseModelSetup = false
+        }
+        .sheet(isPresented: $showingDenoiseModelSetup, onDismiss: {
+            hasSeenDenoiseModelOffer = true
+        }) {
+            DenoiseModelSetupView()
+                .environmentObject(denoiseModel)
         }
     }
 }

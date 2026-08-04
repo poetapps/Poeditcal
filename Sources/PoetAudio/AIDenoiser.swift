@@ -12,7 +12,7 @@ enum AIDenoiserError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .modelUnavailable:
-            "Poet’s local noise-removal model is missing from this build."
+            "Poet’s AI noise reduction isn’t installed yet."
         case .couldNotCreateEngine:
             "Poet couldn’t start its local AI noise-removal engine."
         case .unsupportedRecording:
@@ -64,7 +64,7 @@ enum AIDenoiser {
             throw AIDenoiserError.unsupportedRecording
         }
 
-        guard let modelURL = suppliedModelURL ?? bundledModelURL() else {
+        guard let modelURL = suppliedModelURL ?? installedModelURL() else {
             throw AIDenoiserError.modelUnavailable
         }
 
@@ -152,32 +152,8 @@ enum AIDenoiser {
         )
     }
 
-    static func bundledModelURL() -> URL? {
-        var bundles: [Bundle] = [Bundle.main, Bundle(for: BundleToken.self)]
-        #if SWIFT_PACKAGE
-        bundles.insert(Bundle.module, at: 0)
-        #endif
-
-        for bundle in bundles {
-            if let packaged = bundle.url(
-                forResource: modelFileName,
-                withExtension: "onnx",
-                subdirectory: "Resources/Models"
-            ) {
-                return packaged
-            }
-            if let nested = bundle.url(
-                forResource: modelFileName,
-                withExtension: "onnx",
-                subdirectory: "Models"
-            ) {
-                return nested
-            }
-            if let flat = bundle.url(forResource: modelFileName, withExtension: "onnx") {
-                return flat
-            }
-        }
-        return nil
+    static func installedModelURL() -> URL? {
+        DenoiseModelStore.installedModelIsValid() ? DenoiseModelStore.installedModelURL : nil
     }
 
     private static func prepare(_ source: AVAudioFile) throws -> AVAudioPCMBuffer {
@@ -236,5 +212,3 @@ enum AIDenoiser {
         return converted
     }
 }
-
-private final class BundleToken {}

@@ -6,6 +6,8 @@
 /.swiftpm/
 /DerivedData/
 
+.env
+
 # Xcode user-specific state
 xcuserdata/
 *.xcuserstate
