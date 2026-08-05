@@ -4,6 +4,7 @@ import HuggingFace
 import MLXHuggingFace
 import MLXLLM
 import MLXLMCommon
+import OSLog
 import Tokenizers
 
 enum SmartEditModelChoice: String, CaseIterable, Identifiable, Codable, Sendable {
@@ -47,10 +48,47 @@ struct ContextualEditDeletion: Codable, Sendable, Equatable {
     let kind: String
     let reason: String
     let confidence: Double
+
+    init(
+        startToken: Int,
+        endToken: Int,
+        kind: String,
+        reason: String,
+        confidence: Double
+    ) {
+        self.startToken = startToken
+        self.endToken = endToken
+        self.kind = kind
+        self.reason = reason
+        self.confidence = confidence
+    }
+
+    init(from decoder: any Swift.Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        startToken = try values.decode(Int.self, forKey: .startToken)
+        endToken = try values.decode(Int.self, forKey: .endToken)
+        kind = try values.decodeIfPresent(String.self, forKey: .kind) ?? "correction"
+        reason = try values.decodeIfPresent(String.self, forKey: .reason) ?? "Contextual spoken-word cleanup"
+        if let numeric = try? values.decode(Double.self, forKey: .confidence) {
+            confidence = numeric
+        } else if let text = try? values.decode(String.self, forKey: .confidence),
+                  let numeric = Double(text) {
+            confidence = numeric
+        } else {
+            // Tiny models are often inconsistent about self-reported confidence.
+            // Structural and semantic safeguards still validate the proposed range.
+            confidence = 0.90
+        }
+    }
 }
 
 private struct ContextualEditResponse: Codable {
     let deletions: [ContextualEditDeletion]
+}
+
+private struct ContextualEditAnalysis {
+    let deletions: [ContextualEditDeletion]
+    let rawResponse: String
 }
 
 @MainActor
@@ -64,8 +102,11 @@ final class SmartEditModelStore: ObservableObject {
     @Published private(set) var downloadingChoice: SmartEditModelChoice?
     @Published private(set) var downloadProgress = 0.0
     @Published private(set) var errorMessage: String?
+    @Published private(set) var lastAnalysisStatus: String?
+    @Published private(set) var lastRawResponse: String?
 
     private static let selectionKey = "smartEditModelChoiceV1"
+    private static let logger = Logger(subsystem: "com.poetaudio.mac", category: "SmartEdit")
     private var loadedChoice: SmartEditModelChoice?
     private var loadedContainer: ModelContainer?
 
@@ -102,7 +143,7 @@ final class SmartEditModelStore: ObservableObject {
         } catch is CancellationError {
             errorMessage = nil
         } catch {
-            errorMessage = "Poet couldn’t install (choice.modelName). \(error.localizedDescription)"
+            errorMessage = "Poet couldn’t install \(choice.modelName). \(error.localizedDescription)"
         }
         downloadingChoice = nil
     }
@@ -112,24 +153,33 @@ final class SmartEditModelStore: ObservableObject {
         configuration: AutoEditConfiguration
     ) async throws -> [AutoEditSuggestion] {
         guard isInstalled(selectedChoice), !tokens.isEmpty else { return [] }
+        lastAnalysisStatus = "Running \(selectedChoice.modelName)"
+        lastRawResponse = nil
         let container = try await load(selectedChoice, allowsDownload: false)
         let chunks = Self.chunkRanges(tokenCount: tokens.count)
         var deletions: [ContextualEditDeletion] = []
         for range in chunks {
             try Task.checkCancellation()
             let chunk = Array(tokens[range])
-            deletions += try await Self.analyze(
+            let analysis = try await Self.analyze(
                 container: container,
                 tokens: chunk,
                 globalOffset: range.lowerBound,
                 configuration: configuration
             )
+            deletions += analysis.deletions
+            lastRawResponse = analysis.rawResponse
+            Self.logger.debug("Model proposed \(analysis.deletions.count) ranges for this transcript chunk")
         }
-        return Self.validatedSuggestions(
+        let suggestions = Self.validatedSuggestions(
             deletions,
             tokenCount: tokens.count,
-            configuration: configuration
+            configuration: configuration,
+            tokens: tokens
         )
+        lastAnalysisStatus = "\(suggestions.count) contextual suggestion\(suggestions.count == 1 ? "" : "s")"
+        Self.logger.info("Accepted \(suggestions.count) of \(deletions.count) proposed Smart Edit ranges")
+        return suggestions
     }
 
     private func load(
@@ -164,25 +214,36 @@ final class SmartEditModelStore: ObservableObject {
         tokens: [TranscribedToken],
         globalOffset: Int,
         configuration: AutoEditConfiguration
-    ) async throws -> [ContextualEditDeletion] {
+    ) async throws -> ContextualEditAnalysis {
         let transcript = tokens.enumerated().map { localIndex, token in
             let globalIndex = globalOffset + localIndex
             return "[\(globalIndex)] \(token.text) {\(String(format: "%.2f", token.startTime))s}"
         }.joined(separator: " ")
         let system = """
-        You are Poet Audio's conservative spoken-word editor. Identify only words the speaker clearly intended to replace or abandon: self-corrections, false starts, accidental adjacent repetitions, and genuine verbal fillers. Preserve meaning, style, emphasis, quotations, and intentional discourse phrases. "I mean" is not automatically a filler. If it introduces a correction, delete the abandoned earlier wording together with the correction cue and keep the corrected wording. If it begins or naturally belongs to the intended sentence, keep it. Return token IDs from the supplied transcript only. Never delete the final corrected take. /no_think
+        You are Poet Audio's conservative spoken-word editor. Identify only words the speaker clearly intended to replace or abandon: self-corrections, false starts, accidental adjacent repetitions, and genuine verbal fillers. Preserve meaning, style, emphasis, quotations, and intentional discourse phrases. "I mean" is not automatically a filler. If it introduces a correction, delete the abandoned earlier wording together with the correction cue and keep the corrected wording. If it begins or naturally belongs to the intended sentence, keep it. Return token IDs from the supplied transcript only. Never delete the final corrected take.
         """
         let preferences = """
         Enabled categories: fillers=\(configuration.removeFillers), retakes=\(configuration.detectRetakes), restarts=\(configuration.detectRestarts). Intensity=\(configuration.intensity.rawValue). If no clear edit is needed, return an empty deletions array.
         """
         let prompt = "\(preferences)\nTranscript:\n\(transcript)"
-        let responseShape = #"Return JSON only: {"deletions":[{"startToken":0,"endToken":0,"kind":"filler|correction|retake|restart|repetition","reason":"brief explanation","confidence":0.0}]}. Do not add fields or prose."#
+        let responseShape = """
+        Return JSON only. Every kind must be exactly one of: filler, correction, retake, restart, repetition.
+        Shape: {"deletions":[{"startToken":0,"endToken":3,"kind":"correction","reason":"brief explanation","confidence":0.95}]}
+
+        Example A: [0] It [1] is [2] three [3] PM [4] I [5] mean [6] it [7] is [8] four [9] PM.
+        Correct result: {"deletions":[{"startToken":0,"endToken":5,"kind":"correction","reason":"the earlier time is replaced by the later time","confidence":0.99}]}
+
+        Example B: [0] I [1] mean, [2] what [3] am [4] I [5] supposed [6] to [7] do?
+        Correct result: {"deletions":[]}
+
+        Do not add markdown, fields, or prose. /no_think
+        """
         let session = ChatSession(
             container,
             instructions: system,
             generateParameters: .init(
                 maxTokens: 384,
-                temperature: 0.1,
+                temperature: 0,
                 repetitionPenalty: 1.05
             )
         )
@@ -193,16 +254,18 @@ final class SmartEditModelStore: ObservableObject {
             throw SmartEditModelError.invalidResponse
         }
         let output = String(rawOutput[firstBrace...lastBrace])
-        return try JSONDecoder().decode(
+        let decoded = try JSONDecoder().decode(
             ContextualEditResponse.self,
             from: Data(output.utf8)
-        ).deletions
+        )
+        return ContextualEditAnalysis(deletions: decoded.deletions, rawResponse: rawOutput)
     }
 
     nonisolated static func validatedSuggestions(
         _ deletions: [ContextualEditDeletion],
         tokenCount: Int,
-        configuration: AutoEditConfiguration
+        configuration: AutoEditConfiguration,
+        tokens: [TranscribedToken]? = nil
     ) -> [AutoEditSuggestion] {
         guard tokenCount > 0 else { return [] }
         let threshold: Double = switch configuration.intensity {
@@ -226,7 +289,8 @@ final class SmartEditModelStore: ObservableObject {
                   deletion.endToken >= deletion.startToken,
                   deletion.endToken < tokenCount,
                   deletion.endToken - deletion.startToken < 60,
-                  deletion.endToken - deletion.startToken + 1 < tokenCount else { return nil }
+                  deletion.endToken - deletion.startToken + 1 < tokenCount,
+                  tokens.map({ proposalHasEvidence(deletion, tokens: $0) }) ?? true else { return nil }
             let reason: AutoEditSuggestion.Reason = switch deletion.kind {
             case "filler": .filler
             case "restart": .restart
@@ -240,6 +304,68 @@ final class SmartEditModelStore: ObservableObject {
                 confidence: min(1, deletion.confidence)
             )
         }
+    }
+
+    nonisolated private static func proposalHasEvidence(
+        _ deletion: ContextualEditDeletion,
+        tokens: [TranscribedToken]
+    ) -> Bool {
+        guard tokens.indices.contains(deletion.startToken),
+              tokens.indices.contains(deletion.endToken) else { return false }
+        let words = tokens.map {
+            $0.text.lowercased().trimmingCharacters(in: .punctuationCharacters.union(.whitespacesAndNewlines))
+        }
+        let rangeWords = Array(words[deletion.startToken...deletion.endToken])
+        let fillerWords = Set(["um", "umm", "uh", "uhh", "erm", "er", "hmm", "like", "basically", "actually", "you", "know"])
+
+        if deletion.kind == "filler" {
+            return rangeWords.allSatisfy(fillerWords.contains)
+        }
+        let hasCorrectionCue = rangeWords.contains("no") || rangeWords.contains("nope") ||
+            rangeWords.contains("sorry") || rangeWords.contains("redo") || rangeWords.contains("restart") ||
+            zip(rangeWords, rangeWords.dropFirst()).contains { pair in
+                pair.0 == "i" && pair.1 == "mean"
+            }
+        if deletion.kind == "correction" || deletion.kind == "restart" {
+            return hasCorrectionCue || hasNearbyRepeat(
+                words: words,
+                removedRange: deletion.startToken...deletion.endToken
+            )
+        }
+        return hasNearbyRepeat(
+            words: words,
+            removedRange: deletion.startToken...deletion.endToken
+        )
+    }
+
+    nonisolated private static func hasNearbyRepeat(
+        words: [String],
+        removedRange: ClosedRange<Int>
+    ) -> Bool {
+        let ignored = Set(["um", "umm", "uh", "uhh", "erm", "er", "hmm"])
+        let anchor = words[removedRange]
+            .filter { !ignored.contains($0) && !$0.isEmpty }
+            .prefix(3)
+        guard anchor.count >= 2 else { return false }
+        let searchStart = removedRange.upperBound + 1
+        let searchEnd = min(words.count, searchStart + 24)
+        guard searchStart < searchEnd else { return false }
+        let target = Array(anchor)
+        for start in searchStart..<searchEnd {
+            var cursor = start
+            var matched = 0
+            while cursor < searchEnd, matched < target.count {
+                if ignored.contains(words[cursor]) {
+                    cursor += 1
+                    continue
+                }
+                guard words[cursor] == target[matched] else { break }
+                matched += 1
+                cursor += 1
+            }
+            if matched == target.count { return true }
+        }
+        return false
     }
 
     nonisolated static func chunkRanges(tokenCount: Int) -> [Range<Int>] {

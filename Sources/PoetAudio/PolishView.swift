@@ -419,14 +419,19 @@ private struct PolishingStageText: View {
     let isActive: Bool
     let inactiveOpacity: Double
 
-    private let cycleDuration = 3.2
+    private let cycleDuration = 3.8
     private let shimmerColors = [
-        PoetTheme.cream,
-        Color(hex: 0xF1BFD2),
-        Color(hex: 0xCDBFEF),
         Color(hex: 0xB8D8F0),
-        Color(hex: 0xBFE5D0),
-        PoetTheme.cream
+        Color(hex: 0xF1BFC9),
+        Color(hex: 0xEFA6A4),
+        Color(hex: 0xCDBFEF),
+        Color(hex: 0xF0D58A),
+        Color(hex: 0xB8D8F0),
+        Color(hex: 0xF1BFC9),
+        Color(hex: 0xEFA6A4),
+        Color(hex: 0xCDBFEF),
+        Color(hex: 0xF0D58A),
+        Color(hex: 0xB8D8F0)
     ]
 
     var body: some View {
@@ -438,12 +443,15 @@ private struct PolishingStageText: View {
                         .foregroundStyle(
                             LinearGradient(
                                 colors: shimmerColors,
-                                startPoint: UnitPoint(x: phase * 2.2 - 1.2, y: 0.5),
-                                endPoint: UnitPoint(x: phase * 2.2 + 0.8, y: 0.5)
+                                // Two identical color cycles span four text widths.
+                                // Moving by two widths loops seamlessly, and the
+                                // leading edge begins well outside the glyph mask.
+                                startPoint: UnitPoint(x: phase * 2 - 1.8, y: 0.5),
+                                endPoint: UnitPoint(x: phase * 2 + 2.2, y: 0.5)
                             )
                         )
                         .shadow(color: Color(hex: 0xCDBFEF).opacity(0.2), radius: 5)
-                        .shadow(color: Color(hex: 0xBFE5D0).opacity(0.12), radius: 9)
+                        .shadow(color: Color(hex: 0xB8D8F0).opacity(0.12), radius: 9)
                 }
             } else {
                 Text(text)

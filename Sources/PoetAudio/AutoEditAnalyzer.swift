@@ -85,6 +85,13 @@ enum AutoEditAnalyzer {
         case .thorough: 3
         }
         if configuration.detectRetakes {
+            suggestions.append(contentsOf: explicitCorrectionSuggestions(
+                normalized: normalized,
+                tokens: tokens
+            ))
+            suggestions.append(contentsOf: interruptedRepetitionSuggestions(
+                normalized: normalized
+            ))
             for laterStart in normalized.indices {
                 let searchStart = max(0, laterStart - 80)
                 guard laterStart - searchStart >= minimumMatch else { continue }
@@ -161,6 +168,90 @@ enum AutoEditAnalyzer {
 
     private static func normalize(_ value: String) -> String {
         value.lowercased().trimmingCharacters(in: .punctuationCharacters.union(.whitespacesAndNewlines))
+    }
+
+    /// Detect a correction only when the wording after “I mean” clearly resumes
+    /// an earlier clause. This protects intentional uses such as “I mean, what am
+    /// I supposed to do?” while catching “It is eight—nope, sorry, I mean it is seven.”
+    private static func explicitCorrectionSuggestions(
+        normalized: [String],
+        tokens: [TranscribedToken]
+    ) -> [AutoEditSuggestion] {
+        guard normalized.count >= 5 else { return [] }
+        var result: [AutoEditSuggestion] = []
+        for cueStart in normalized.indices where normalized[cueStart] == "i" {
+            let cueEnd = cueStart + 1
+            guard cueEnd < normalized.count, normalized[cueEnd] == "mean" else { continue }
+            var correctedStart = cueEnd + 1
+            while correctedStart < normalized.count, fillers.contains(normalized[correctedStart]) {
+                correctedStart += 1
+            }
+            guard correctedStart < normalized.count else { continue }
+
+            let earlierBoundary = utteranceStart(before: cueStart, tokens: tokens)
+            guard earlierBoundary < cueStart else { continue }
+            let explicitCue = normalized[earlierBoundary..<cueStart].contains { word in
+                word == "no" || word == "nope" || word == "sorry" || word == "actually"
+            }
+            var bestStart: Int?
+            var bestLength = 0
+            for earlierStart in earlierBoundary..<cueStart {
+                var length = 0
+                while length < 4,
+                      earlierStart + length < cueStart,
+                      correctedStart + length < normalized.count,
+                      normalized[earlierStart + length] == normalized[correctedStart + length],
+                      !normalized[earlierStart + length].isEmpty {
+                    length += 1
+                }
+                if length > bestLength {
+                    bestStart = earlierStart
+                    bestLength = length
+                }
+            }
+            guard let bestStart,
+                  bestLength >= 2 || (bestLength == 1 && explicitCue) else { continue }
+            result.append(AutoEditSuggestion(
+                range: bestStart...cueEnd,
+                reason: .correction,
+                confidence: explicitCue ? 0.99 : 0.95
+            ))
+        }
+        return result
+    }
+
+    /// Catch a short take repeated immediately after a hesitation, such as
+    /// “it is, um, it is about seven.” The earlier fragment and hesitation are
+    /// removed together so the surviving sentence remains grammatical.
+    private static func interruptedRepetitionSuggestions(
+        normalized: [String]
+    ) -> [AutoEditSuggestion] {
+        guard normalized.count >= 5 else { return [] }
+        var result: [AutoEditSuggestion] = []
+        for laterStart in normalized.indices where laterStart >= 3 {
+            for length in stride(from: 4, through: 2, by: -1) {
+                guard laterStart + length <= normalized.count else { continue }
+                let earliest = max(0, laterStart - length - 3)
+                guard earliest <= laterStart - length else { continue }
+                for earlierStart in earliest...(laterStart - length) {
+                    let earlierEnd = earlierStart + length
+                    let bridge = normalized[earlierEnd..<laterStart]
+                    guard bridge.count <= 3,
+                          bridge.allSatisfy({ fillers.contains($0) }),
+                          Array(normalized[earlierStart..<earlierEnd]) == Array(normalized[laterStart..<(laterStart + length)]) else {
+                        continue
+                    }
+                    result.append(AutoEditSuggestion(
+                        range: earlierStart...(laterStart - 1),
+                        reason: .repetition,
+                        confidence: bridge.isEmpty ? 0.94 : 0.98
+                    ))
+                    break
+                }
+                if result.last?.range.upperBound == laterStart - 1 { break }
+            }
+        }
+        return result
     }
 
     private static func occurrences(of phrase: [String], in words: [String]) -> [ClosedRange<Int>] {

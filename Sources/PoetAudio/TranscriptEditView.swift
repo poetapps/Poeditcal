@@ -72,6 +72,7 @@ private struct TranscriptPanel: View {
     @EnvironmentObject private var model: AppModel
     @State private var tokenFrames: [UUID: CGRect] = [:]
     @State private var dragAnchorID: UUID?
+    @State private var highlightedPauseID: UUID?
 
     private let selectionSpace = "transcript-selection"
 
@@ -95,7 +96,8 @@ private struct TranscriptPanel: View {
 
     var body: some View {
         PoetCard(padding: 0) {
-            VStack(spacing: 0) {
+            ScrollViewReader { transcriptProxy in
+                VStack(spacing: 0) {
                 HStack(spacing: 12) {
                     Text("Transcript").font(PoetTheme.editorial(22, weight: .regular))
                     Circle().fill(model.isDemoTranscript ? PoetTheme.amber : PoetTheme.sage).frame(width: 5, height: 5)
@@ -126,7 +128,15 @@ private struct TranscriptPanel: View {
                 Rectangle().fill(PoetTheme.divider).frame(height: 1)
 
                 if !model.pauseDecisions.isEmpty {
-                    PauseReviewStrip()
+                    PauseReviewStrip(highlightedPauseID: $highlightedPauseID) { pause in
+                        guard let pause else { return }
+                        let target = pause.beforeWordID ?? pause.afterWordID
+                        if let target {
+                            withAnimation(.easeInOut(duration: 0.25)) {
+                                transcriptProxy.scrollTo(target, anchor: .center)
+                            }
+                        }
+                    }
                     Rectangle().fill(PoetTheme.divider).frame(height: 1)
                 }
 
@@ -144,8 +154,10 @@ private struct TranscriptPanel: View {
                                         TranscriptToken(
                                             word: word,
                                             isSelected: model.selectedWordIDs.contains(word.id),
+                                            pauseEdge: pauseEdge(for: word.id),
                                             coordinateSpace: selectionSpace
                                         )
+                                        .id(word.id)
                                     }
                                 }
                                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -173,8 +185,16 @@ private struct TranscriptPanel: View {
 
                 PlayerBar()
                     .padding(18)
+                }
             }
         }
+    }
+
+    private func pauseEdge(for wordID: UUID) -> PauseHighlightEdge? {
+        guard let pause = model.pauseDecisions.first(where: { $0.id == highlightedPauseID }) else { return nil }
+        if pause.afterWordID == wordID { return .after }
+        if pause.beforeWordID == wordID { return .before }
+        return nil
     }
 
     private func clock(_ value: TimeInterval) -> String {
@@ -225,6 +245,7 @@ private struct TranscriptToken: View {
     @State private var isPopping = false
     let word: TranscriptWord
     let isSelected: Bool
+    let pauseEdge: PauseHighlightEdge?
     let coordinateSpace: String
 
     private var active: Bool {
@@ -250,7 +271,9 @@ private struct TranscriptToken: View {
                 .padding(.horizontal, 6)
                 .padding(.vertical, 5)
                 .background {
-                    if isSelected {
+                    if pauseEdge != nil {
+                        RoundedRectangle(cornerRadius: 7, style: .continuous).fill(Color(hex: 0xCDBFEF).opacity(0.2))
+                    } else if isSelected {
                         RoundedRectangle(cornerRadius: 7, style: .continuous).fill(PoetTheme.sage.opacity(0.3))
                     } else if active {
                         RoundedRectangle(cornerRadius: 6, style: .continuous).fill(PoetTheme.sageDark)
@@ -258,6 +281,21 @@ private struct TranscriptToken: View {
                         RoundedRectangle(cornerRadius: 7, style: .continuous).fill(PoetTheme.sageDark.opacity(0.9))
                     } else if word.isRemoved {
                         RoundedRectangle(cornerRadius: 6, style: .continuous).fill(PoetTheme.amberDark.opacity(0.45))
+                    }
+                }
+                .overlay {
+                    if pauseEdge != nil {
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .stroke(Color(hex: 0xCDBFEF).opacity(0.82), lineWidth: 1)
+                    }
+                }
+                .overlay(alignment: pauseEdge == .after ? .trailing : .leading) {
+                    if pauseEdge != nil {
+                        Capsule()
+                            .fill(Color(hex: 0xF0D58A))
+                            .frame(width: 3, height: 22)
+                            .offset(x: pauseEdge == .after ? 5 : -5)
+                            .shadow(color: Color(hex: 0xCDBFEF).opacity(0.45), radius: 5)
                     }
                 }
                 .overlay {
@@ -278,6 +316,7 @@ private struct TranscriptToken: View {
         .offset(y: isHovered ? -2 : 0)
         .shadow(color: isHovered ? PoetTheme.sage.opacity(0.13) : .clear, radius: 10, y: 4)
         .animation(.spring(response: 0.25, dampingFraction: 0.72), value: isHovered)
+        .animation(.easeOut(duration: 0.16), value: pauseEdge)
         .onHover { isHovered = $0 }
         .help(word.reason ?? (word.isRemoved ? "Restore word" : "Remove word"))
         .background {
@@ -289,6 +328,11 @@ private struct TranscriptToken: View {
             }
         }
     }
+}
+
+private enum PauseHighlightEdge: Equatable {
+    case before
+    case after
 }
 
 /// Keeps the token's measured size constant while its visual weight changes.
@@ -420,6 +464,8 @@ private struct PlayerBar: View {
 
 private struct PauseReviewStrip: View {
     @EnvironmentObject private var model: AppModel
+    @Binding var highlightedPauseID: UUID?
+    let onHighlight: (PauseEditDecision?) -> Void
 
     var body: some View {
         HStack(spacing: 12) {
@@ -446,6 +492,10 @@ private struct PauseReviewStrip: View {
                             .clipShape(Capsule())
                         }
                         .buttonStyle(.plain)
+                        .onHover { isHovering in
+                            highlightedPauseID = isHovering ? pause.id : nil
+                            onHighlight(isHovering ? pause : nil)
+                        }
                         .help("\(pause.reason) · \(Int(pause.confidence * 100))% confidence. Click to \(pause.isProtected ? "compact" : "protect") this pause.")
                     }
                 }

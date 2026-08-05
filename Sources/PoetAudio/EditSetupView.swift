@@ -4,8 +4,9 @@ struct EditSetupView: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var smartEditModel: SmartEditModelStore
     @State private var step = 0
+    @State private var modelToDownload: SmartEditModelChoice?
 
-    private let stepNames = ["Control", "Intensity", "Pacing", "First pass"]
+    private let stepNames = ["Control", "Intensity", "Smart Edit", "Pacing", "First pass"]
 
     var body: some View {
         VStack(spacing: 0) {
@@ -16,7 +17,8 @@ struct EditSetupView: View {
                 switch step {
                 case 0: controlStep
                 case 1: intensityStep
-                case 2: pacingStep
+                case 2: smartEditStep
+                case 3: pacingStep
                 default: polishStep
                 }
             }
@@ -33,6 +35,10 @@ struct EditSetupView: View {
         .padding(.horizontal, 42)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .animation(.spring(response: 0.44, dampingFraction: 0.86), value: step)
+        .sheet(item: $modelToDownload) { choice in
+            SmartEditDownloadView(choice: choice)
+                .environmentObject(smartEditModel)
+        }
     }
 
     private var controlStep: some View {
@@ -89,11 +95,26 @@ struct EditSetupView: View {
                 }
                 .opacity(model.editingMode == .autopilot ? 1 : 0.4)
                 .allowsHitTesting(model.editingMode == .autopilot)
-
-                SmartEditModelPicker()
-                    .opacity(model.editingMode == .autopilot ? 1 : 0.4)
-                    .allowsHitTesting(model.editingMode == .autopilot)
             }
+        }
+    }
+
+    private var smartEditStep: some View {
+        SetupPage(
+            title: "Give Smart Edit more awareness?",
+            detail: model.editingMode == .fullControl
+                ? "Smart Edit is saved for whenever you switch to Autopilot. Nothing is downloaded unless you choose a model."
+                : "A local language model helps Poet understand corrections, false starts, and ambiguous phrasing instead of judging words in isolation."
+        ) {
+            VStack(alignment: .leading, spacing: 14) {
+                SmartEditModelPicker { choice in
+                    modelToDownload = choice
+                }
+                Label("Runs entirely on this Mac after a one-time download", systemImage: "lock.shield")
+                    .font(PoetTheme.utility(10, weight: .medium))
+                    .foregroundStyle(PoetTheme.muted)
+            }
+            .opacity(model.editingMode == .autopilot ? 1 : 0.55)
         }
     }
 
@@ -188,6 +209,7 @@ struct EditSetupView: View {
 
 private struct SmartEditModelPicker: View {
     @EnvironmentObject private var smartEditModel: SmartEditModelStore
+    let onDownload: (SmartEditModelChoice) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -234,7 +256,7 @@ private struct SmartEditModelPicker: View {
             if installed {
                 smartEditModel.select(choice)
             } else {
-                Task { await smartEditModel.install(choice) }
+                onDownload(choice)
             }
         } label: {
             VStack(alignment: .leading, spacing: 7) {
@@ -243,9 +265,14 @@ private struct SmartEditModelPicker: View {
                         .font(PoetTheme.utility(11, weight: .semibold))
                     Spacer()
                     if downloading {
-                        ProgressView(value: smartEditModel.downloadProgress)
-                            .progressViewStyle(.circular)
-                            .controlSize(.small)
+                        if smartEditModel.downloadProgress >= 0.02 && smartEditModel.downloadProgress < 0.98 {
+                            ProgressView(value: smartEditModel.downloadProgress)
+                                .progressViewStyle(.circular)
+                                .controlSize(.small)
+                        } else {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
                     } else {
                         Image(systemName: selected ? "checkmark.circle.fill" : (installed ? "checkmark.circle" : "arrow.down.circle"))
                             .foregroundStyle(selected ? PoetTheme.sage : PoetTheme.muted)
@@ -258,7 +285,7 @@ private struct SmartEditModelPicker: View {
                     .font(PoetTheme.utility(9))
                     .foregroundStyle(PoetTheme.muted)
                     .lineLimit(2)
-                Text(installed ? (selected ? "Selected" : "Use this model") : (downloading ? "Downloading \(Int(smartEditModel.downloadProgress * 100))%" : "Download"))
+                Text(installed ? (selected ? "Selected" : "Use this model") : (downloading ? "Downloading…" : "Download"))
                     .font(PoetTheme.utility(8, weight: .semibold))
                     .foregroundStyle(installed || downloading ? PoetTheme.sage : PoetTheme.amber)
             }
@@ -273,6 +300,126 @@ private struct SmartEditModelPicker: View {
         }
         .buttonStyle(.plain)
         .disabled(smartEditModel.downloadingChoice != nil)
+    }
+}
+
+private struct SmartEditDownloadView: View {
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var smartEditModel: SmartEditModelStore
+
+    let choice: SmartEditModelChoice
+
+    private var isDownloading: Bool { smartEditModel.downloadingChoice == choice }
+    private var isInstalled: Bool { smartEditModel.isInstalled(choice) }
+    private var isPending: Bool { !isInstalled && smartEditModel.errorMessage == nil }
+    private var showsMeasuredProgress: Bool {
+        isDownloading && smartEditModel.downloadProgress >= 0.02 && smartEditModel.downloadProgress < 0.98
+    }
+
+    var body: some View {
+        VStack(spacing: 24) {
+            SmartEditDownloadArtwork(isComplete: isInstalled && !isDownloading)
+
+            VStack(spacing: 8) {
+                Text(isInstalled && !isDownloading ? "Smart Edit is ready" : "Downloading Smart Edit")
+                    .font(PoetTheme.editorial(27, weight: .regular))
+                Text(choice.modelName)
+                    .font(PoetTheme.utility(12, weight: .semibold))
+                    .foregroundStyle(PoetTheme.sage)
+                Text(statusText)
+                    .font(PoetTheme.utility(11))
+                    .foregroundStyle(PoetTheme.muted)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 360)
+            }
+
+            Group {
+                if showsMeasuredProgress {
+                    ProgressView(value: smartEditModel.downloadProgress)
+                } else if isDownloading || isPending {
+                    ProgressView()
+                }
+            }
+            .tint(PoetTheme.sage)
+            .frame(width: 330)
+
+            if let error = smartEditModel.errorMessage, !isDownloading {
+                Text(error)
+                    .font(PoetTheme.utility(10, weight: .medium))
+                    .foregroundStyle(PoetTheme.error)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 390)
+            }
+
+            if isInstalled && !isDownloading {
+                Button("Continue") { dismiss() }
+                    .buttonStyle(PrimaryButtonStyle())
+            } else if !isDownloading && !isPending {
+                Button("Try again") { Task { await smartEditModel.install(choice) } }
+                    .buttonStyle(PrimaryButtonStyle())
+            }
+
+            Label("The model stays on this Mac. Your audio is never uploaded.", systemImage: "lock.fill")
+                .font(PoetTheme.utility(9))
+                .foregroundStyle(PoetTheme.faint)
+        }
+        .padding(36)
+        .frame(width: 500, height: 520)
+        .background(PoetTheme.background)
+        .interactiveDismissDisabled(isDownloading || isPending)
+        .task {
+            if !isInstalled && smartEditModel.downloadingChoice == nil {
+                await smartEditModel.install(choice)
+            }
+        }
+    }
+
+    private var statusText: String {
+        if isInstalled && !isDownloading {
+            return "Poet can now use broader context when reviewing spoken-word edits."
+        }
+        guard isDownloading || isPending else { return "The download didn’t finish. Nothing incomplete was installed." }
+        if smartEditModel.downloadProgress >= 0.98 {
+            return "Finishing the local model setup…"
+        }
+        if showsMeasuredProgress {
+            return "Model files · \(Int((smartEditModel.downloadProgress * 100).rounded()))%"
+        }
+        return "Connecting and preparing the model files…"
+    }
+}
+
+private struct SmartEditDownloadArtwork: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let isComplete: Bool
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: reduceMotion || isComplete)) { context in
+            let phase = context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 3.6) / 3.6
+            ZStack {
+                Circle()
+                    .stroke(PoetTheme.elevated, lineWidth: 1)
+                    .frame(width: 116, height: 116)
+                Circle()
+                    .trim(from: 0.08, to: 0.76)
+                    .stroke(
+                        AngularGradient(
+                            colors: [Color(hex: 0xB8D8F0), Color(hex: 0xF1BFC9), Color(hex: 0xCDBFEF), Color(hex: 0xF0D58A), Color(hex: 0xB8D8F0)],
+                            center: .center
+                        ),
+                        style: StrokeStyle(lineWidth: 4, lineCap: .round)
+                    )
+                    .frame(width: 116, height: 116)
+                    .rotationEffect(.degrees(reduceMotion || isComplete ? 0 : phase * 360))
+                Circle()
+                    .fill(PoetTheme.elevated)
+                    .frame(width: 78, height: 78)
+                Image(systemName: isComplete ? "checkmark" : "brain.head.profile")
+                    .font(.system(size: 27, weight: .medium))
+                    .foregroundStyle(isComplete ? PoetTheme.sage : PoetTheme.cream)
+            }
+        }
+        .frame(height: 124)
     }
 }
 

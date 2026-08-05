@@ -148,6 +148,18 @@ final class EngineTests: XCTestCase {
         XCTAssertFalse(removed.contains(1))
     }
 
+    func testAutoEditRemovesInterruptedAdjacentRepeat() {
+        let words = ["it", "is", "um", "it", "is", "about", "seven"]
+        let tokens = words.enumerated().map { index, word in
+            TranscribedToken(text: word, startTime: Double(index) * 0.25, duration: 0.18, confidence: 0.94)
+        }
+
+        let suggestions = AutoEditAnalyzer.suggestions(for: tokens)
+        let repetition = suggestions.first { $0.reason == .repetition }
+
+        XCTAssertEqual(repetition?.range, 0...2)
+    }
+
     func testSmartEditValidatorAcceptsHighConfidenceCorrection() {
         let deletion = ContextualEditDeletion(
             startToken: 0,
@@ -190,6 +202,42 @@ final class EngineTests: XCTestCase {
         XCTAssertEqual(SmartEditModelChoice.fast.repoID, "mlx-community/Qwen3-0.6B-4bit")
         XCTAssertEqual(SmartEditModelChoice.reliable.repoID, "mlx-community/Qwen3-1.7B-4bit")
         XCTAssertNotEqual(SmartEditModelChoice.fast.repoID, SmartEditModelChoice.reliable.repoID)
+    }
+
+    @MainActor
+    func testReliableSmartEditHandlesExplicitTimeCorrection() async throws {
+        guard SmartEditModelStore.shared.isInstalled(.reliable) else {
+            throw XCTSkip("The Reliable Smart Edit model is not installed on this test Mac.")
+        }
+        let words = "Alright so um this is just another test. It is about eight PM nope sorry I mean it is um it is about seven forty two p.m. and I just wanted to uh you know test this out see how it sounds."
+            .split(separator: " ")
+            .map(String.init)
+        let tokens = words.enumerated().map { index, word in
+            TranscribedToken(
+                text: word,
+                startTime: Double(index) * 0.35,
+                duration: 0.24,
+                confidence: 0.94
+            )
+        }
+        let store = SmartEditModelStore.shared
+        store.select(.reliable)
+
+        let contextual = try await store.contextualSuggestions(
+            for: tokens,
+            configuration: AutoEditConfiguration()
+        )
+        let suggestions = AutoEditAnalyzer.suggestions(for: tokens) + contextual
+        let correction = suggestions.first { $0.reason == .correction }
+        if correction == nil {
+            print("SMART_EDIT_RAW=\((store.lastRawResponse ?? "nil").replacingOccurrences(of: "\n", with: "\\n"))")
+            print("SMART_EDIT_SUGGESTIONS=\(suggestions.map { "\($0.range):\($0.reason.rawValue):\($0.confidence)" })")
+        }
+
+        XCTAssertNotNil(correction)
+        XCTAssertEqual(correction?.range.lowerBound, words.firstIndex(of: "It"))
+        XCTAssertTrue(correction?.range.contains(words.firstIndex(of: "mean")!) == true)
+        XCTAssertFalse(correction?.range.contains(words.lastIndex(of: "it")!) == true)
     }
 
     func testAutoEditCategoryTogglesAreHonored() {

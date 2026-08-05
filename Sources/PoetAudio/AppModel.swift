@@ -1,6 +1,7 @@
 import AppKit
 import AVFoundation
 import Foundation
+import OSLog
 import SwiftUI
 
 enum WorkflowPhase: String, Hashable, Codable, Sendable {
@@ -748,11 +749,15 @@ final class AppModel: ObservableObject {
             for: tokens,
             configuration: autoEditConfiguration
         )
-        if let contextual = try? await SmartEditModelStore.shared.contextualSuggestions(
-            for: tokens,
-            configuration: autoEditConfiguration
-        ) {
+        do {
+            let contextual = try await SmartEditModelStore.shared.contextualSuggestions(
+                for: tokens,
+                configuration: autoEditConfiguration
+            )
             suggestions.append(contentsOf: contextual)
+        } catch {
+            Logger(subsystem: "com.poetaudio.mac", category: "SmartEdit")
+                .error("Contextual analysis failed: \(error.localizedDescription, privacy: .public)")
         }
         var reasons: [Int: String] = [:]
         for suggestion in suggestions {
