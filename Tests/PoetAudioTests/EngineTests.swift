@@ -498,6 +498,30 @@ final class EngineTests: XCTestCase {
         XCTAssertEqual(refined[0].startTime + refined[0].duration, 0.52, accuracy: 0.05)
     }
 
+    func testDiskBackedSpeechTimingRefinerMatchesInMemoryResult() throws {
+        let sampleRate = 16_000.0
+        var samples = [Float](repeating: 0.002, count: Int(sampleRate * 1.4))
+        addSine(to: &samples, sampleRate: sampleRate, range: 0.1..<0.38, amplitude: 0.2)
+        addAlternatingNoise(to: &samples, sampleRate: sampleRate, range: 0.58..<0.82, amplitude: 0.025)
+        addSine(to: &samples, sampleRate: sampleRate, range: 1.0..<1.3, amplitude: 0.2)
+        let tokens = [
+            TranscribedToken(text: "First", startTime: 0.1, duration: 0.9, confidence: 0.9),
+            TranscribedToken(text: "Next", startTime: 1.0, duration: 0.3, confidence: 0.9)
+        ]
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PoetTimingTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let audioURL = folder.appendingPathComponent("timing.wav")
+        try write(samples: samples, sampleRate: sampleRate, to: audioURL)
+
+        let memoryResult = SpeechTimingRefiner.refine(tokens, samples: samples, sampleRate: sampleRate)
+        let diskResult = try SpeechTimingRefiner.refine(tokens, audioURL: audioURL)
+
+        XCTAssertEqual(diskResult.map(\.startTime), memoryResult.map(\.startTime))
+        XCTAssertEqual(diskResult.map(\.duration), memoryResult.map(\.duration))
+    }
+
     func testTranscriptionMergerRecoversOnlyMissingHesitations() {
         let primary = [
             TranscribedToken(text: "This", startTime: 0.1, duration: 0.3, confidence: 0.9),
@@ -619,7 +643,7 @@ final class EngineTests: XCTestCase {
         XCTAssertLessThanOrEqual(output.length, input.length)
     }
 
-    func testNativePolishChainRendersPlayableAudio() throws {
+    func testNativePolishChainRendersPlayableAudio() async throws {
         let folder = FileManager.default.temporaryDirectory
             .appendingPathComponent("PoetPolishTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -628,7 +652,7 @@ final class EngineTests: XCTestCase {
         let source = folder.appendingPathComponent("source.wav")
         let finished = folder.appendingPathComponent("finished.wav")
         try makeTone(at: source, duration: 1.2)
-        try VoicePolisher.render(
+        try await VoicePolisher.render(
             sourceURL: source,
             destinationURL: finished,
             options: AudioRenderOptions(
@@ -695,7 +719,7 @@ final class EngineTests: XCTestCase {
         XCTAssertEqual(AudioEditPlanner.editedDuration(for: ranges), 2.15, accuracy: 0.001)
     }
 
-    func testRealRecordingExportsSynchronizedPackage() throws {
+    func testRealRecordingExportsSynchronizedPackage() async throws {
         let workspaceSource = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("short_Test Recording.m4a")
         let source = FileManager.default.fileExists(atPath: workspaceSource.path)
@@ -748,7 +772,7 @@ final class EngineTests: XCTestCase {
             includeVTT: true
         )
 
-        let exported = try ExportPackageRenderer.render(request)
+        let exported = try await ExportPackageRenderer.render(request)
         let finishedAudio = exported.appendingPathComponent("integration-finished.wav")
         let originalAudio = exported.appendingPathComponent("integration-original.m4a")
         let output = try AVAudioFile(forReading: finishedAudio)
@@ -775,7 +799,11 @@ final class EngineTests: XCTestCase {
         let qualityOutput = folder.appendingPathComponent("quality-polished.wav")
         let ranges = AudioEditPlanner.keptRanges(words: words, duration: sourceDuration, pacing: .natural)
         try EditedAudioRenderer.render(sourceURL: source, destinationURL: dry, keptRanges: ranges)
-        let report = try VoicePolisher.render(sourceURL: dry, destinationURL: qualityOutput, options: renderOptions)
+        let report = try await VoicePolisher.render(
+            sourceURL: dry,
+            destinationURL: qualityOutput,
+            options: renderOptions
+        )
         print("Real recording post-check: \(report.quality.summary); gentle retry: \(report.quality.usedGentleCompression); controlled breaths: \(report.breathControl?.count ?? 0)")
         XCTAssertTrue(report.quality.passed, report.quality.summary)
         XCTAssertLessThanOrEqual(report.quality.breathLiftDB, 2.5)
@@ -838,6 +866,28 @@ final class EngineTests: XCTestCase {
         for index in start..<end {
             samples[index] += index.isMultiple(of: 2) ? amplitude : -amplitude
         }
+    }
+
+    private func write(samples: [Float], sampleRate: Double, to url: URL) throws {
+        let format = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: sampleRate,
+            channels: 1,
+            interleaved: false
+        )!
+        let file = try AVAudioFile(
+            forWriting: url,
+            settings: format.settings,
+            commonFormat: .pcmFormatFloat32,
+            interleaved: false
+        )
+        let capacity = AVAudioFrameCount(samples.count)
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: capacity)!
+        buffer.frameLength = capacity
+        samples.withUnsafeBufferPointer { source in
+            buffer.floatChannelData!.pointee.update(from: source.baseAddress!, count: samples.count)
+        }
+        try file.write(from: buffer)
     }
 
     private func makeBreathFixture(at url: URL) throws {

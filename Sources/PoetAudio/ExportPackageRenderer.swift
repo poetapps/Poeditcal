@@ -47,7 +47,7 @@ enum ExportPackageRenderer {
     static func render(
         _ request: ExportPackageRequest,
         progress: PolishProgressHandler? = nil
-    ) throws -> URL {
+    ) async throws -> URL {
         let exportFolder = request.folder.appendingPathComponent("\(request.baseName) — Poet Export", isDirectory: true)
         try FileManager.default.createDirectory(at: exportFolder, withIntermediateDirectories: true)
 
@@ -108,7 +108,7 @@ enum ExportPackageRenderer {
             let editedURL = tempFolder.appendingPathComponent("edited.wav")
             let finishedURL = exportFolder.appendingPathComponent("\(request.baseName)-finished.wav")
             try EditedAudioRenderer.render(sourceURL: sourceURL, destinationURL: editedURL, keptRanges: ranges)
-            try VoicePolisher.render(
+            try await VoicePolisher.render(
                 sourceURL: editedURL,
                 destinationURL: finishedURL,
                 options: request.renderOptions,

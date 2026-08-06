@@ -38,11 +38,35 @@ struct AudioWindowSignature: Sendable {
     let derivativeRatio: Double
 }
 
+struct PolishReferenceAnalysis: Sendable {
+    let windows: [AudioWindowSignature]
+    let voice: VoiceAnalysis
+    let breathRegions: [AudioTimeRange]
+
+    static func analyze(url: URL) throws -> PolishReferenceAnalysis {
+        let windows = try BreathDetector.signatures(for: url)
+        let voice = try AudioSignalAnalyzer.analyze(url: url)
+        return PolishReferenceAnalysis(
+            windows: windows,
+            voice: voice,
+            breathRegions: BreathDetector.regions(windows: windows, analysis: voice)
+        )
+    }
+}
+
 enum BreathDetector {
     static func regions(in url: URL) throws -> [AudioTimeRange] {
         let windows = try signatures(for: url)
         guard !windows.isEmpty else { return [] }
         let analysis = try AudioSignalAnalyzer.analyze(url: url)
+        return regions(windows: windows, analysis: analysis)
+    }
+
+    static func regions(
+        windows: [AudioWindowSignature],
+        analysis: VoiceAnalysis
+    ) -> [AudioTimeRange] {
+        guard !windows.isEmpty else { return [] }
         let quiet = windows.filter {
             $0.rmsDB > analysis.noiseFloorDB + 5 &&
             $0.rmsDB < analysis.speechLevelDB - 6
@@ -135,9 +159,10 @@ enum BreathController {
         dryReferenceURL: URL,
         sourceURL: URL,
         destinationURL: URL,
-        attenuationDB: Double = -2.25
+        attenuationDB: Double = -2.25,
+        detectedRegions: [AudioTimeRange]? = nil
     ) throws -> BreathControlResult {
-        let regions = try BreathDetector.regions(in: dryReferenceURL)
+        let regions = try detectedRegions ?? BreathDetector.regions(in: dryReferenceURL)
         let result = BreathControlResult(regions: regions)
         guard !regions.isEmpty else {
             try? FileManager.default.removeItem(at: destinationURL)
@@ -192,12 +217,14 @@ enum PolishQualityAnalyzer {
         dryURL: URL,
         polishedURL: URL,
         usedGentleCompression: Bool,
-        bypassedCompression: Bool = false
+        bypassedCompression: Bool = false,
+        dryReference: PolishReferenceAnalysis? = nil
     ) throws -> PolishQualityReport {
-        let dryWindows = try BreathDetector.signatures(for: dryURL)
+        let reference = try dryReference ?? PolishReferenceAnalysis.analyze(url: dryURL)
+        let dryWindows = reference.windows
         let polishedWindows = try BreathDetector.signatures(for: polishedURL)
-        let breathRegions = try BreathDetector.regions(in: dryURL)
-        let dryAnalysis = try AudioSignalAnalyzer.analyze(url: dryURL)
+        let breathRegions = reference.breathRegions
+        let dryAnalysis = reference.voice
         let polishedAnalysis = try AudioSignalAnalyzer.analyze(url: polishedURL)
         let count = min(dryWindows.count, polishedWindows.count)
 

@@ -582,6 +582,16 @@ final class AppModel: ObservableObject {
         processingTask = Task { [weak self] in
             guard let self else { return }
             do {
+                // These source-only measurements and model loading do not depend
+                // on the cleaned first pass. Start them now so long recordings do
+                // not pay for additional serial full-file scans afterward.
+                async let preparedTranscriber: Void = speechTranscriber.prepare { _, _ in }
+                async let earlyAnalysis = Task.detached(priority: .utility) {
+                    try? AudioSignalAnalyzer.analyze(url: url)
+                }.value
+                async let earlyLoudness = Task.detached(priority: .utility) {
+                    try? LoudnessAnalyzer.measure(url: url)
+                }.value
                 processingLabel = "Preparing a clean first pass"
                 processingTip = "The original stays untouched. This full-length copy keeps the same timeline."
                 let transcriptionURL: URL
@@ -619,6 +629,7 @@ final class AppModel: ObservableObject {
                 processingProgress = 0.22
                 processingLabel = "Transcribing the first pass"
                 processingTip = "Every recognized word maps back to the untouched original."
+                try await preparedTranscriber
                 let hasFirstPass = firstPassAudioURL != nil
                 let primaryTokens = try await speechTranscriber.transcribe(url: transcriptionURL) { fraction, label in
                     let transcriptionShare = hasFirstPass ? 0.42 : 0.56
@@ -632,9 +643,12 @@ final class AppModel: ObservableObject {
                 if hasFirstPass {
                     processingLabel = "Recovering ums and uhs"
                     processingTip = "Comparing the clean transcript with the untouched performance."
-                    if let originalTokens = try? await speechTranscriber.transcribe(url: url) { fraction, _ in
-                        self.processingProgress = 0.64 + min(fraction * 0.14, 0.14)
-                    } {
+                    if let originalTokens = try? await speechTranscriber.transcribe(
+                        url: url,
+                        progress: { fraction, _ in
+                            self.processingProgress = 0.64 + min(fraction * 0.14, 0.14)
+                        }
+                    ) {
                         tokens = TranscriptionMerger.recoverHesitations(
                             primary: primaryTokens,
                             original: originalTokens
@@ -657,12 +671,6 @@ final class AppModel: ObservableObject {
                 processingLabel = "Confirming real pauses"
                 let analyzedWords = words
                 let selectedPauseDuration = pauseDuration
-                async let analysis = Task.detached(priority: .userInitiated) {
-                    try? AudioSignalAnalyzer.analyze(url: url)
-                }.value
-                async let loudness = Task.detached(priority: .userInitiated) {
-                    try? LoudnessAnalyzer.measure(url: url)
-                }.value
                 async let pauses = Task.detached(priority: .userInitiated) {
                     try? PauseAnalyzer.analyze(
                         sourceURL: url,
@@ -670,8 +678,8 @@ final class AppModel: ObservableObject {
                         maximumPause: selectedPauseDuration
                     )
                 }.value
-                voiceAnalysis = await analysis
-                sourceLoudness = await loudness
+                voiceAnalysis = await earlyAnalysis
+                sourceLoudness = await earlyLoudness
                 pauseDecisions = await pauses ?? []
                 usesAcousticPauseDecisions = true
 
@@ -1230,7 +1238,7 @@ final class AppModel: ObservableObject {
                 let polished = folder.appendingPathComponent("polished.wav")
                 try EditedAudioRenderer.render(sourceURL: sourceURL, destinationURL: dry, keptRanges: ranges)
                 try Task.checkCancellation()
-                let report = try VoicePolisher.render(
+                let report = try await VoicePolisher.render(
                     sourceURL: dry,
                     destinationURL: polished,
                     options: options,
@@ -1367,7 +1375,7 @@ final class AppModel: ObservableObject {
             guard let self else { return }
             do {
                 _ = try await Task.detached(priority: .userInitiated) {
-                    try ExportPackageRenderer.render(request, progress: exportProgressHandler)
+                    try await ExportPackageRenderer.render(request, progress: exportProgressHandler)
                 }.value
                 exportProgress = 1
                 exportStatus = "Exported to \(base) — Poet Export"

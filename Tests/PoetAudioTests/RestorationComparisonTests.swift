@@ -3,7 +3,7 @@ import XCTest
 @testable import PoetAudio
 
 final class RestorationComparisonTests: XCTestCase {
-    func testRenderMatchedRestorationComparison() throws {
+    func testRenderMatchedRestorationComparison() async throws {
         guard ProcessInfo.processInfo.environment["POET_RUN_RESTORATION_COMPARISON"] == "1" else {
             throw XCTSkip("Set POET_RUN_RESTORATION_COMPARISON=1 to render the external restoration comparison.")
         }
@@ -36,7 +36,7 @@ final class RestorationComparisonTests: XCTestCase {
             XCTAssertTrue(FileManager.default.fileExists(atPath: source.path), "Missing \(source.path)")
 
             let started = ContinuousClock.now
-            let report = try VoicePolisher.render(
+            let report = try await VoicePolisher.render(
                 sourceURL: source,
                 destinationURL: destination,
                 options: options

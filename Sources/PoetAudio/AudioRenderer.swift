@@ -404,8 +404,11 @@ enum VoicePolisher {
         destinationURL: URL,
         options: AudioRenderOptions,
         progress: PolishProgressHandler? = nil
-    ) throws -> PolishRenderReport {
-        func measured<T>(_ name: String, _ operation: () throws -> T) throws -> T {
+    ) async throws -> PolishRenderReport {
+        @Sendable func measured<T>(
+            _ name: String,
+            _ operation: @Sendable () throws -> T
+        ) throws -> T {
             try Task.checkCancellation()
             progress?(PolishStageUpdate(name: name, state: .started, elapsed: nil))
             let started = CFAbsoluteTimeGetCurrent()
@@ -419,6 +422,7 @@ enum VoicePolisher {
             return result
         }
 
+        let dryReference = try PolishReferenceAnalysis.analyze(url: sourceURL)
         let needsEffects = options.voiceEQ || options.deEss || options.compression || options.forceMono
         guard needsEffects || options.breathControl || options.normalizeLoudness else {
             try? FileManager.default.removeItem(at: destinationURL)
@@ -426,7 +430,8 @@ enum VoicePolisher {
             let quality = try PolishQualityAnalyzer.compare(
                 dryURL: sourceURL,
                 polishedURL: destinationURL,
-                usedGentleCompression: false
+                usedGentleCompression: false,
+                dryReference: dryReference
             )
             return PolishRenderReport(loudness: nil, quality: quality, breathControl: nil, deEssing: nil)
         }
@@ -435,10 +440,7 @@ enum VoicePolisher {
             .appendingPathComponent("PoetPolish-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: tempFolder, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tempFolder) }
-        let processedURL = tempFolder.appendingPathComponent("processed.wav")
         let denoisedURL = tempFolder.appendingPathComponent("ai-denoised.wav")
-        let deEssedURL = tempFolder.appendingPathComponent("adaptive-de-essed.wav")
-        let breathURL = tempFolder.appendingPathComponent("breath-controlled.wav")
         let baselineURL = tempFolder.appendingPathComponent("compression-baseline.wav")
 
         let polishSourceURL: URL
@@ -454,13 +456,24 @@ enum VoicePolisher {
         } else {
             polishSourceURL = sourceURL
         }
+        let engineAnalysis: VoiceAnalysis? = if options.voiceEQ || options.compression {
+            polishSourceURL == sourceURL
+                ? dryReference.voice
+                : try? AudioSignalAnalyzer.analyze(url: polishSourceURL)
+        } else {
+            nil
+        }
 
-        func runPass(
+        @Sendable func runPass(
             destination passDestinationURL: URL,
             gentleCompression: Bool,
             bypassCompression: Bool = false,
+            workspace: String,
             label: String
         ) throws -> PolishRenderReport {
+            let processedURL = tempFolder.appendingPathComponent("\(workspace)-processed.wav")
+            let deEssedURL = tempFolder.appendingPathComponent("\(workspace)-adaptive-de-essed.wav")
+            let breathURL = tempFolder.appendingPathComponent("\(workspace)-breath-controlled.wav")
             let needsEngineEffects = options.voiceEQ || options.compression || options.forceMono
             if needsEngineEffects {
                 var engineStages: [String] = []
@@ -473,6 +486,7 @@ enum VoicePolisher {
                         sourceURL: polishSourceURL,
                         destinationURL: processedURL,
                         options: options,
+                        analysis: engineAnalysis,
                         gentleCompression: gentleCompression,
                         bypassCompression: bypassCompression
                     )
@@ -506,7 +520,8 @@ enum VoicePolisher {
                         dryReferenceURL: sourceURL,
                         sourceURL: breathSourceURL,
                         destinationURL: breathURL,
-                        attenuationDB: options.breathIntensity.breathAttenuationDB
+                        attenuationDB: options.breathIntensity.breathAttenuationDB,
+                        detectedRegions: dryReference.breathRegions
                     )
                 }
                 masteringSource = breathURL
@@ -534,7 +549,8 @@ enum VoicePolisher {
                     dryURL: sourceURL,
                     polishedURL: passDestinationURL,
                     usedGentleCompression: gentleCompression,
-                    bypassedCompression: bypassCompression
+                    bypassedCompression: bypassCompression,
+                    dryReference: dryReference
                 )
             }
             return PolishRenderReport(
@@ -546,18 +562,51 @@ enum VoicePolisher {
         }
 
         guard options.compression else {
-            return try runPass(destination: destinationURL, gentleCompression: false, label: "Main pass")
+            return try runPass(
+                destination: destinationURL,
+                gentleCompression: false,
+                workspace: "main",
+                label: "Main pass"
+            )
         }
 
         // Establish how the same polish chain behaves without compression. Comparing
         // against this baseline isolates compressor-induced breath lift from intended
         // changes made by EQ, noise reduction, breath control, and normalization.
-        let baseline = try runPass(
-            destination: baselineURL,
-            gentleCompression: true,
-            bypassCompression: true,
-            label: "Baseline (compression bypassed)"
-        )
+        // The baseline and standard candidate share only immutable inputs. Run
+        // them together with isolated workspaces; this removes one full chain
+        // from the critical path without changing either rendered candidate.
+        var initialCandidates: [Int: PolishRenderReport] = [:]
+        try await withThrowingTaskGroup(of: (Int, PolishRenderReport).self) { group in
+            for index in 0..<2 {
+                group.addTask {
+                    try Task.checkCancellation()
+                if index == 0 {
+                        return (index, try runPass(
+                            destination: baselineURL,
+                            gentleCompression: true,
+                            bypassCompression: true,
+                            workspace: "baseline",
+                            label: "Baseline (compression bypassed)"
+                        ))
+                    }
+                    return (index, try runPass(
+                        destination: destinationURL,
+                        gentleCompression: false,
+                        workspace: "standard",
+                        label: "Standard compression"
+                    ))
+                }
+            }
+            for try await (index, report) in group {
+                initialCandidates[index] = report
+            }
+        }
+        guard let baseline = initialCandidates[0],
+              let standardCandidate = initialCandidates[1] else {
+            throw AudioRenderError.renderFailed
+        }
+        var candidate = standardCandidate
 
         func checked(_ candidate: PolishRenderReport, gentle: Bool) throws -> PolishRenderReport {
             let quality = try measured("\(gentle ? "Gentle" : "Standard") · compare with baseline") {
@@ -575,11 +624,15 @@ enum VoicePolisher {
             )
         }
 
-        var candidate = try runPass(destination: destinationURL, gentleCompression: false, label: "Standard compression")
         var report = try checked(candidate, gentle: false)
         if report.quality.passed { return report }
 
-        candidate = try runPass(destination: destinationURL, gentleCompression: true, label: "Gentle compression retry")
+        candidate = try runPass(
+            destination: destinationURL,
+            gentleCompression: true,
+            workspace: "gentle",
+            label: "Gentle compression retry"
+        )
         report = try checked(candidate, gentle: true)
         if report.quality.passed { return report }
 
@@ -603,6 +656,7 @@ enum VoicePolisher {
         sourceURL: URL,
         destinationURL: URL,
         options: AudioRenderOptions,
+        analysis: VoiceAnalysis?,
         gentleCompression: Bool,
         bypassCompression: Bool
     ) throws {
@@ -621,7 +675,6 @@ enum VoicePolisher {
         } else {
             renderFormat = format
         }
-        let analysis = try? AudioSignalAnalyzer.analyze(url: sourceURL)
         let engine = AVAudioEngine()
         let player = AVAudioPlayerNode()
         engine.attach(player)

@@ -1,6 +1,7 @@
 import AVFoundation
 import FluidAudio
 import Foundation
+import os
 
 struct TranscribedToken: Sendable {
     let text: String
@@ -32,6 +33,12 @@ enum TranscriptionError: LocalizedError {
 final class LocalSpeechTranscriber {
     private var manager: AsrManager?
 
+    func prepare(
+        progress: @escaping @MainActor @Sendable (_ fraction: Double, _ label: String) -> Void
+    ) async throws {
+        _ = try await preparedManager(progress: progress)
+    }
+
     func transcribe(
         url: URL,
         progress: @escaping @MainActor @Sendable (_ fraction: Double, _ label: String) -> Void
@@ -39,40 +46,26 @@ final class LocalSpeechTranscriber {
         try Task.checkCancellation()
         progress(0.04, manager == nil ? "Preparing local Parakeet" : "Loading your recording")
 
-        let asr: AsrManager
-        if let manager {
-            asr = manager
-        } else {
-            do {
-                let models = try await AsrModels.downloadAndLoad(version: .v2) { download in
-                    Task { @MainActor in
-                        progress(
-                            0.08 + download.fractionCompleted * 0.32,
-                            Self.downloadLabel(for: download.phase)
-                        )
-                    }
-                }
-                let loaded = AsrManager(config: .default)
-                try await loaded.loadModels(models)
-                manager = loaded
-                asr = loaded
-            } catch is CancellationError {
-                throw CancellationError()
-            } catch {
-                throw TranscriptionError.modelUnavailable(error.localizedDescription)
-            }
-        }
+        let asr = try await preparedManager(progress: progress)
 
         try Task.checkCancellation()
-        progress(0.44, "Loading your recording")
-        let samples = try await Task.detached(priority: .userInitiated) {
-            try Self.load16kMonoAudio(from: url)
+        progress(0.44, "Preparing your recording")
+        let preparedFolder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PoetTranscription-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: preparedFolder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: preparedFolder) }
+        let preparedURL = preparedFolder.appendingPathComponent("prepared-16k-mono.wav")
+        try await Task.detached(priority: .userInitiated) {
+            try Self.prepare16kMonoAudio(from: url, destinationURL: preparedURL)
         }.value
 
         try Task.checkCancellation()
         progress(0.52, "Transcribing every word")
         var decoderState = TdtDecoderState.make(decoderLayers: await asr.decoderLayerCount)
-        let result = try await asr.transcribe(samples, decoderState: &decoderState)
+        // FluidAudio automatically selects its constant-memory, four-worker
+        // disk-backed path for long files. Supplying a canonical WAV also keeps
+        // Voice Memo ALAC decoding under AVFoundation's reliable reader.
+        let result = try await asr.transcribe(preparedURL, decoderState: &decoderState)
         try Task.checkCancellation()
         progress(0.88, "Looking for retakes and fillers")
 
@@ -89,10 +82,38 @@ final class LocalSpeechTranscriber {
                 confidence: result.confidence
             )
         }
-        let tokens = SpeechTimingRefiner.refine(rawTokens, samples: samples, sampleRate: 16_000)
+        let tokens = try await Task.detached(priority: .userInitiated) {
+            try SpeechTimingRefiner.refine(rawTokens, audioURL: preparedURL)
+        }.value
 
         guard !tokens.isEmpty else { throw TranscriptionError.noSpeechFound }
         return tokens
+    }
+
+    private func preparedManager(
+        progress: @escaping @MainActor @Sendable (_ fraction: Double, _ label: String) -> Void
+    ) async throws -> AsrManager {
+        if let manager {
+            return manager
+        }
+        do {
+            let models = try await AsrModels.downloadAndLoad(version: .v2) { download in
+                Task { @MainActor in
+                    progress(
+                        0.08 + download.fractionCompleted * 0.32,
+                        Self.downloadLabel(for: download.phase)
+                    )
+                }
+            }
+            let loaded = AsrManager(config: .default)
+            try await loaded.loadModels(models)
+            manager = loaded
+            return loaded
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw TranscriptionError.modelUnavailable(error.localizedDescription)
+        }
     }
 
     func cancel() {
@@ -110,73 +131,88 @@ final class LocalSpeechTranscriber {
         }
     }
 
-    /// AVAudioFile successfully decodes Voice Memo ALAC files that FluidAudio's
-    /// convenience URL reader currently rejects. Parakeet expects mono Float32 at 16 kHz.
-    nonisolated private static func load16kMonoAudio(from url: URL) throws -> [Float] {
+    /// Stream-decodes through AVFoundation so even hour-long Voice Memo ALAC
+    /// recordings stay at constant memory. Parakeet expects mono Float32 at 16 kHz.
+    nonisolated private static func prepare16kMonoAudio(
+        from url: URL,
+        destinationURL: URL
+    ) throws {
         let source = try AVAudioFile(
             forReading: url,
             commonFormat: .pcmFormatFloat32,
             interleaved: false
         )
         let sourceFormat = source.processingFormat
-        guard source.length > 0,
-              source.length <= AVAudioFramePosition(UInt32.max),
-              let input = AVAudioPCMBuffer(
-                  pcmFormat: sourceFormat,
-                  frameCapacity: AVAudioFrameCount(source.length)
-              ) else {
+        guard source.length > 0 else {
             throw TranscriptionError.unsupportedAudio
         }
-        try source.read(into: input)
+        guard let outputFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 16_000,
+            channels: 1,
+            interleaved: false
+        ), let converter = AVAudioConverter(from: sourceFormat, to: outputFormat) else {
+            throw TranscriptionError.unsupportedAudio
+        }
 
-        let prepared: AVAudioPCMBuffer
-        if abs(sourceFormat.sampleRate - 16_000) < 1,
-           sourceFormat.channelCount == 1,
-           sourceFormat.commonFormat == .pcmFormatFloat32,
-           !sourceFormat.isInterleaved {
-            prepared = input
-        } else {
-            guard let outputFormat = AVAudioFormat(
-                commonFormat: .pcmFormatFloat32,
-                sampleRate: 16_000,
-                channels: 1,
-                interleaved: false
-            ), let converter = AVAudioConverter(from: sourceFormat, to: outputFormat) else {
-                throw TranscriptionError.unsupportedAudio
+        try? FileManager.default.removeItem(at: destinationURL)
+        let output = try AVAudioFile(
+            forWriting: destinationURL,
+            settings: outputFormat.settings,
+            commonFormat: .pcmFormatFloat32,
+            interleaved: false
+        )
+        let inputCapacity: AVAudioFrameCount = 16_384
+        let outputCapacity = AVAudioFrameCount(
+            ceil(Double(inputCapacity) * outputFormat.sampleRate / sourceFormat.sampleRate) + 512
+        )
+        guard let inputBuffer = AVAudioPCMBuffer(pcmFormat: sourceFormat, frameCapacity: inputCapacity),
+              let outputBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: outputCapacity) else {
+            throw TranscriptionError.unsupportedAudio
+        }
+
+        nonisolated(unsafe) let capturedInput = inputBuffer
+        let reachedEnd = OSAllocatedUnfairLock(initialState: false)
+        let readError = OSAllocatedUnfairLock<Error?>(initialState: nil)
+        let inputBlock: AVAudioConverterInputBlock = { _, status in
+            if reachedEnd.withLock({ $0 }) {
+                status.pointee = .endOfStream
+                return nil
             }
-
-            let ratio = 16_000 / sourceFormat.sampleRate
-            let estimatedFrames = Int(ceil(Double(input.frameLength) * ratio)) + 512
-            guard estimatedFrames > 0,
-                  estimatedFrames <= Int(UInt32.max),
-                  let converted = AVAudioPCMBuffer(
-                      pcmFormat: outputFormat,
-                      frameCapacity: AVAudioFrameCount(estimatedFrames)
-                  ) else {
-                throw TranscriptionError.unsupportedAudio
-            }
-
-            var suppliedInput = false
-            var conversionError: NSError?
-            let status = converter.convert(to: converted, error: &conversionError) { _, inputStatus in
-                if suppliedInput {
-                    inputStatus.pointee = .endOfStream
-                    return nil
+            do {
+                let remaining = max(0, source.length - source.framePosition)
+                let count = AVAudioFrameCount(min(AVAudioFramePosition(inputCapacity), remaining))
+                if count > 0 {
+                    try source.read(into: capturedInput, frameCount: count)
+                } else {
+                    capturedInput.frameLength = 0
                 }
-                suppliedInput = true
-                inputStatus.pointee = .haveData
-                return input
+            } catch {
+                readError.withLock { $0 = error }
+                capturedInput.frameLength = 0
             }
-            guard status != .error, converted.frameLength > 0 else {
-                throw TranscriptionError.unsupportedAudio
+            guard capturedInput.frameLength > 0 else {
+                reachedEnd.withLock { $0 = true }
+                status.pointee = .endOfStream
+                return nil
             }
-            prepared = converted
+            status.pointee = .haveData
+            return capturedInput
         }
 
-        guard let channel = prepared.floatChannelData?.pointee else {
-            throw TranscriptionError.unsupportedAudio
+        while true {
+            try Task.checkCancellation()
+            outputBuffer.frameLength = 0
+            var conversionError: NSError?
+            let status = converter.convert(to: outputBuffer, error: &conversionError, withInputFrom: inputBlock)
+            if let readError = readError.withLock({ $0 }) { throw readError }
+            guard status != .error, conversionError == nil else {
+                throw conversionError ?? TranscriptionError.unsupportedAudio
+            }
+            if outputBuffer.frameLength > 0 { try output.write(from: outputBuffer) }
+            if status == .endOfStream { break }
         }
-        return Array(UnsafeBufferPointer(start: channel, count: Int(prepared.frameLength)))
+        guard output.length > 0 else { throw TranscriptionError.unsupportedAudio }
     }
 }
 
@@ -253,52 +289,27 @@ enum SpeechTimingRefiner {
     ) -> [TranscribedToken] {
         guard !tokens.isEmpty, !samples.isEmpty, sampleRate > 0 else { return tokens }
         let windows = analyze(samples: samples, sampleRate: sampleRate)
-        guard !windows.isEmpty else { return tokens }
+        return refine(tokens, windows: windows, duration: Double(samples.count) / sampleRate)
+    }
 
-        let levels = windows.map(\.rmsDB).sorted()
-        let noiseFloor = percentile(levels, 0.15)
-        let speechLevel = percentile(levels, 0.78)
-        guard speechLevel > noiseFloor + 4 else { return tokens }
-
-        return tokens.enumerated().map { index, token in
-            let intervalEnd: TimeInterval
-            if index + 1 < tokens.count {
-                intervalEnd = tokens[index + 1].startTime
-            } else {
-                intervalEnd = min(
-                    Double(samples.count) / sampleRate,
-                    token.startTime + token.duration
-                )
-            }
-            guard intervalEnd > token.startTime + 0.04 else { return token }
-
-            let firstWindow = min(
-                windows.count,
-                max(0, Int(floor(token.startTime / windowDuration)))
-            )
-            let windowAfterInterval = min(
-                windows.count,
-                max(firstWindow, Int(ceil(intervalEnd / windowDuration)))
-            )
-            let candidates = windows[firstWindow..<windowAfterInterval]
-            let activityGate = noiseFloor + min(10, max(5, (speechLevel - noiseFloor) * 0.38))
-            let breathCeiling = speechLevel - 5
-            let lastSpeechEnd = candidates.last(where: { window in
-                let breathLike = window.rmsDB < breathCeiling && window.derivativeRatio >= 0.55
-                return window.rmsDB >= activityGate && !breathLike
-            })?.end
-
-            guard let lastSpeechEnd else { return token }
-            // Preserve consonant releases and timestamp quantization at the word
-            // edge, but never let that safety tail enter the next word.
-            let acousticEnd = min(intervalEnd, max(token.startTime + 0.04, lastSpeechEnd + 0.04))
-            return TranscribedToken(
-                text: token.text,
-                startTime: token.startTime,
-                duration: acousticEnd - token.startTime,
-                confidence: token.confidence
-            )
-        }
+    static func refine(
+        _ tokens: [TranscribedToken],
+        audioURL: URL
+    ) throws -> [TranscribedToken] {
+        guard !tokens.isEmpty else { return tokens }
+        let file = try AVAudioFile(
+            forReading: audioURL,
+            commonFormat: .pcmFormatFloat32,
+            interleaved: false
+        )
+        let sampleRate = file.processingFormat.sampleRate
+        guard sampleRate > 0, file.processingFormat.channelCount == 1 else { return tokens }
+        let windows = try analyze(file: file)
+        return refine(
+            tokens,
+            windows: windows,
+            duration: Double(file.length) / sampleRate
+        )
     }
 
     private static func analyze(samples: [Float], sampleRate: Double) -> [Window] {
@@ -332,6 +343,85 @@ enum SpeechTimingRefiner {
             offset = end
         }
         return result
+    }
+
+    private static func analyze(file: AVAudioFile) throws -> [Window] {
+        let sampleRate = file.processingFormat.sampleRate
+        let windowSize = max(1, Int(sampleRate * windowDuration))
+        guard let buffer = AVAudioPCMBuffer(
+            pcmFormat: file.processingFormat,
+            frameCapacity: AVAudioFrameCount(windowSize)
+        ) else { throw TranscriptionError.unsupportedAudio }
+        var result: [Window] = []
+        result.reserveCapacity(Int(ceil(Double(file.length) / Double(windowSize))))
+        var offset: AVAudioFramePosition = 0
+        while file.framePosition < file.length {
+            try Task.checkCancellation()
+            try file.read(into: buffer, frameCount: AVAudioFrameCount(windowSize))
+            let count = Int(buffer.frameLength)
+            guard count > 0, let samples = buffer.floatChannelData?.pointee else { break }
+            var energy = 0.0
+            var differenceEnergy = 0.0
+            var previous: Float?
+            for index in 0..<count {
+                let sample = samples[index]
+                energy += Double(sample) * Double(sample)
+                if let previous {
+                    let difference = Double(sample - previous)
+                    differenceEnergy += difference * difference
+                }
+                previous = sample
+            }
+            let rms = sqrt(energy / Double(count))
+            let derivativeRMS = sqrt(differenceEnergy / Double(max(count - 1, 1)))
+            result.append(Window(
+                start: Double(offset) / sampleRate,
+                end: Double(offset + AVAudioFramePosition(count)) / sampleRate,
+                rmsDB: 20 * log10(max(rms, 0.000_001)),
+                derivativeRatio: derivativeRMS / max(rms, 0.000_001)
+            ))
+            offset += AVAudioFramePosition(count)
+        }
+        return result
+    }
+
+    private static func refine(
+        _ tokens: [TranscribedToken],
+        windows: [Window],
+        duration: TimeInterval
+    ) -> [TranscribedToken] {
+        guard !tokens.isEmpty, !windows.isEmpty else { return tokens }
+        let levels = windows.map(\.rmsDB).sorted()
+        let noiseFloor = percentile(levels, 0.15)
+        let speechLevel = percentile(levels, 0.78)
+        guard speechLevel > noiseFloor + 4 else { return tokens }
+
+        return tokens.enumerated().map { index, token in
+            let intervalEnd = index + 1 < tokens.count
+                ? tokens[index + 1].startTime
+                : min(duration, token.startTime + token.duration)
+            guard intervalEnd > token.startTime + 0.04 else { return token }
+            let firstWindow = min(windows.count, max(0, Int(floor(token.startTime / windowDuration))))
+            let windowAfterInterval = min(
+                windows.count,
+                max(firstWindow, Int(ceil(intervalEnd / windowDuration)))
+            )
+            let candidates = windows[firstWindow..<windowAfterInterval]
+            let activityGate = noiseFloor + min(10, max(5, (speechLevel - noiseFloor) * 0.38))
+            let breathCeiling = speechLevel - 5
+            let lastSpeechEnd = candidates.last(where: { window in
+                let breathLike = window.rmsDB < breathCeiling && window.derivativeRatio >= 0.55
+                return window.rmsDB >= activityGate && !breathLike
+            })?.end
+            guard let lastSpeechEnd else { return token }
+            let acousticEnd = min(intervalEnd, max(token.startTime + 0.04, lastSpeechEnd + 0.04))
+            return TranscribedToken(
+                text: token.text,
+                startTime: token.startTime,
+                duration: acousticEnd - token.startTime,
+                confidence: token.confidence
+            )
+        }
     }
 
     private static func percentile(_ sorted: [Double], _ fraction: Double) -> Double {

@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import os
 
 struct AnalysisFirstPassReport: Sendable, Equatable {
     let usedNoiseReduction: Bool
@@ -81,60 +82,11 @@ enum TimelineAlignedAudioRenderer {
         )
         let targetFormat = source.processingFormat
         guard source.length > 0,
-              source.length <= AVAudioFramePosition(UInt32.max),
               candidate.length > 0,
-              candidate.length <= AVAudioFramePosition(UInt32.max),
-              let input = AVAudioPCMBuffer(
-                pcmFormat: candidate.processingFormat,
-                frameCapacity: AVAudioFrameCount(candidate.length)
-              ) else {
+              targetFormat.commonFormat == .pcmFormatFloat32,
+              !targetFormat.isInterleaved else {
             throw AudioRenderError.unsupportedPCMFormat
         }
-        try candidate.read(into: input)
-
-        let targetFrames = AVAudioFrameCount(source.length)
-        guard let aligned = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: targetFrames),
-              let outputChannels = aligned.floatChannelData else {
-            throw AudioRenderError.unsupportedPCMFormat
-        }
-
-        if candidate.processingFormat == targetFormat {
-            let copiedFrames = min(Int(input.frameLength), Int(targetFrames))
-            guard let inputChannels = input.floatChannelData else {
-                throw AudioRenderError.unsupportedPCMFormat
-            }
-            for channel in 0..<Int(targetFormat.channelCount) {
-                outputChannels[channel].update(from: inputChannels[channel], count: copiedFrames)
-            }
-            aligned.frameLength = AVAudioFrameCount(copiedFrames)
-        } else {
-            guard let converter = AVAudioConverter(from: candidate.processingFormat, to: targetFormat) else {
-                throw AudioRenderError.unsupportedPCMFormat
-            }
-            var suppliedInput = false
-            var conversionError: NSError?
-            let status = converter.convert(to: aligned, error: &conversionError) { _, inputStatus in
-                if suppliedInput {
-                    inputStatus.pointee = .endOfStream
-                    return nil
-                }
-                suppliedInput = true
-                inputStatus.pointee = .haveData
-                return input
-            }
-            guard status != .error else {
-                throw conversionError ?? AudioRenderError.renderFailed
-            }
-        }
-
-        let producedFrames = Int(aligned.frameLength)
-        if producedFrames < Int(targetFrames) {
-            for channel in 0..<Int(targetFormat.channelCount) {
-                outputChannels[channel].advanced(by: producedFrames)
-                    .initialize(repeating: 0, count: Int(targetFrames) - producedFrames)
-            }
-        }
-        aligned.frameLength = targetFrames
 
         try? FileManager.default.removeItem(at: destinationURL)
         let output = try AVAudioFile(
@@ -143,10 +95,140 @@ enum TimelineAlignedAudioRenderer {
             commonFormat: .pcmFormatFloat32,
             interleaved: false
         )
-        try output.write(from: aligned)
+        let targetFrames = source.length
+        if candidate.processingFormat == targetFormat {
+            try copy(
+                candidate: candidate,
+                output: output,
+                format: targetFormat,
+                targetFrames: targetFrames
+            )
+        } else {
+            try convert(
+                candidate: candidate,
+                output: output,
+                targetFormat: targetFormat,
+                targetFrames: targetFrames
+            )
+        }
+        try pad(output: output, format: targetFormat, to: targetFrames)
 
         let sourceDuration = Double(source.length) / targetFormat.sampleRate
         let outputDuration = Double(output.length) / targetFormat.sampleRate
         return Alignment(sourceDuration: sourceDuration, outputDuration: outputDuration)
+    }
+
+    private static func copy(
+        candidate: AVAudioFile,
+        output: AVAudioFile,
+        format: AVAudioFormat,
+        targetFrames: AVAudioFramePosition
+    ) throws {
+        let capacity: AVAudioFrameCount = 16_384
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: capacity) else {
+            throw AudioRenderError.unsupportedPCMFormat
+        }
+        while candidate.framePosition < candidate.length, output.length < targetFrames {
+            try Task.checkCancellation()
+            let remaining = targetFrames - output.length
+            let count = AVAudioFrameCount(min(AVAudioFramePosition(capacity), remaining))
+            try candidate.read(into: buffer, frameCount: count)
+            guard buffer.frameLength > 0 else { break }
+            try output.write(from: buffer)
+        }
+    }
+
+    private static func convert(
+        candidate: AVAudioFile,
+        output: AVAudioFile,
+        targetFormat: AVAudioFormat,
+        targetFrames: AVAudioFramePosition
+    ) throws {
+        guard let converter = AVAudioConverter(from: candidate.processingFormat, to: targetFormat) else {
+            throw AudioRenderError.unsupportedPCMFormat
+        }
+        let inputCapacity: AVAudioFrameCount = 16_384
+        let outputCapacity: AVAudioFrameCount = 16_384
+        guard let inputBuffer = AVAudioPCMBuffer(
+            pcmFormat: candidate.processingFormat,
+            frameCapacity: inputCapacity
+        ), let outputBuffer = AVAudioPCMBuffer(
+            pcmFormat: targetFormat,
+            frameCapacity: outputCapacity
+        ) else { throw AudioRenderError.unsupportedPCMFormat }
+
+        nonisolated(unsafe) let capturedInput = inputBuffer
+        let reachedEnd = OSAllocatedUnfairLock(initialState: false)
+        let readError = OSAllocatedUnfairLock<Error?>(initialState: nil)
+        let inputBlock: AVAudioConverterInputBlock = { _, status in
+            if reachedEnd.withLock({ $0 }) {
+                status.pointee = .endOfStream
+                return nil
+            }
+            do {
+                let remaining = max(0, candidate.length - candidate.framePosition)
+                let count = AVAudioFrameCount(min(AVAudioFramePosition(inputCapacity), remaining))
+                if count > 0 {
+                    try candidate.read(into: capturedInput, frameCount: count)
+                } else {
+                    capturedInput.frameLength = 0
+                }
+            } catch {
+                readError.withLock { $0 = error }
+                capturedInput.frameLength = 0
+            }
+            guard capturedInput.frameLength > 0 else {
+                reachedEnd.withLock { $0 = true }
+                status.pointee = .endOfStream
+                return nil
+            }
+            status.pointee = .haveData
+            return capturedInput
+        }
+
+        while output.length < targetFrames {
+            try Task.checkCancellation()
+            let remaining = targetFrames - output.length
+            outputBuffer.frameLength = 0
+            var conversionError: NSError?
+            let status = converter.convert(
+                to: outputBuffer,
+                error: &conversionError,
+                withInputFrom: inputBlock
+            )
+            if let readError = readError.withLock({ $0 }) { throw readError }
+            guard status != .error, conversionError == nil else {
+                throw conversionError ?? AudioRenderError.renderFailed
+            }
+            if outputBuffer.frameLength > 0 {
+                if AVAudioFramePosition(outputBuffer.frameLength) > remaining {
+                    outputBuffer.frameLength = AVAudioFrameCount(remaining)
+                }
+                try output.write(from: outputBuffer)
+            }
+            if status == .endOfStream { break }
+        }
+    }
+
+    private static func pad(
+        output: AVAudioFile,
+        format: AVAudioFormat,
+        to targetFrames: AVAudioFramePosition
+    ) throws {
+        let capacity: AVAudioFrameCount = 16_384
+        guard let silence = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: capacity),
+              let channels = silence.floatChannelData else {
+            throw AudioRenderError.unsupportedPCMFormat
+        }
+        for channel in 0..<Int(format.channelCount) {
+            channels[channel].initialize(repeating: 0, count: Int(capacity))
+        }
+        while output.length < targetFrames {
+            try Task.checkCancellation()
+            silence.frameLength = AVAudioFrameCount(
+                min(AVAudioFramePosition(capacity), targetFrames - output.length)
+            )
+            try output.write(from: silence)
+        }
     }
 }
