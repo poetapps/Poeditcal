@@ -34,6 +34,10 @@
 		A10000000000000000000019 /* AnalysisFirstPassRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000018 /* AnalysisFirstPassRenderer.swift */; };
 		A1000000000000000000001A /* PauseAnalyzer.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000019 /* PauseAnalyzer.swift */; };
 		A1000000000000000000001B /* SmartEditModelStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000001A /* SmartEditModelStore.swift */; };
+		A1000000000000000000001C /* VideoMedia.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000001B /* VideoMedia.swift */; };
+		A1000000000000000000001D /* EditableTimelineRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000001C /* EditableTimelineRenderer.swift */; };
+		A1000000000000000000001E /* ClipTimelineView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000001D /* ClipTimelineView.swift */; };
+		A1000000000000000000001F /* Branding.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000001E /* Branding.swift */; };
 		B10000000000000000000001 /* EngineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000000000000000000001 /* EngineTests.swift */; };
 		B10000000000000000000002 /* WhisperIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000000000000000000002 /* WhisperIntegrationTests.swift */; };
 		B10000000000000000000003 /* short_Test Recording.m4a in Resources */ = {isa = PBXBuildFile; fileRef = F50000000000000000000001 /* short_Test Recording.m4a */; };
@@ -88,13 +92,17 @@
 		F10000000000000000000018 /* AnalysisFirstPassRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnalysisFirstPassRenderer.swift; sourceTree = "<group>"; };
 		F10000000000000000000019 /* PauseAnalyzer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PauseAnalyzer.swift; sourceTree = "<group>"; };
 		F1000000000000000000001A /* SmartEditModelStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SmartEditModelStore.swift; sourceTree = "<group>"; };
+		F1000000000000000000001B /* VideoMedia.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoMedia.swift; sourceTree = "<group>"; };
+		F1000000000000000000001C /* EditableTimelineRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditableTimelineRenderer.swift; sourceTree = "<group>"; };
+		F1000000000000000000001D /* ClipTimelineView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipTimelineView.swift; sourceTree = "<group>"; };
+		F1000000000000000000001E /* Branding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Branding.swift; sourceTree = "<group>"; };
 		F20000000000000000000001 /* EngineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineTests.swift; sourceTree = "<group>"; };
 		F20000000000000000000002 /* WhisperIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhisperIntegrationTests.swift; sourceTree = "<group>"; };
 		F20000000000000000000003 /* DenoiseIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DenoiseIntegrationTests.swift; sourceTree = "<group>"; };
 		F20000000000000000000004 /* AdaptiveDeEsserTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdaptiveDeEsserTests.swift; sourceTree = "<group>"; };
 		F20000000000000000000005 /* RestorationComparisonTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RestorationComparisonTests.swift; sourceTree = "<group>"; };
 		F30000000000000000000001 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
-		F40000000000000000000001 /* Poet Audio.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Poet Audio.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		F40000000000000000000001 /* Poeditcal.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Poeditcal.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		F40000000000000000000002 /* PoetAudioTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PoetAudioTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		F50000000000000000000001 /* short_Test Recording.m4a */ = {isa = PBXFileReference; lastKnownFileType = audio.m4a; path = "short_Test Recording.m4a"; sourceTree = "<group>"; };
 		F60000000000000000000001 /* Vendor/PoetDenoise.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; path = Vendor/PoetDenoise.xcframework; sourceTree = "<group>"; };
@@ -142,6 +150,7 @@
 		E30000000000000000000002 /* Sources/PoetAudio */ = {
 			isa = PBXGroup;
 			children = (
+				F1000000000000000000001E /* Branding.swift */,
 				F10000000000000000000012 /* AIDenoiser.swift */,
 				F10000000000000000000013 /* AdaptiveDeEsser.swift */,
 				F10000000000000000000014 /* ProjectDocument.swift */,
@@ -151,6 +160,9 @@
 				F10000000000000000000018 /* AnalysisFirstPassRenderer.swift */,
 				F10000000000000000000019 /* PauseAnalyzer.swift */,
 				F1000000000000000000001A /* SmartEditModelStore.swift */,
+				F1000000000000000000001B /* VideoMedia.swift */,
+				F1000000000000000000001C /* EditableTimelineRenderer.swift */,
+				F1000000000000000000001D /* ClipTimelineView.swift */,
 				F10000000000000000000001 /* AppModel.swift */,
 				F10000000000000000000002 /* AudioRenderer.swift */,
 				F10000000000000000000003 /* AudioSignalAnalyzer.swift */,
@@ -195,7 +207,7 @@
 		E30000000000000000000005 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				F40000000000000000000001 /* Poet Audio.app */,
+				F40000000000000000000001 /* Poeditcal.app */,
 				F40000000000000000000002 /* PoetAudioTests.xctest */,
 			);
 			name = Products;
@@ -227,7 +239,7 @@
 				C20000000000000000000008 /* Tokenizers */,
 			);
 			productName = PoetAudio;
-			productReference = F40000000000000000000001 /* Poet Audio.app */;
+			productReference = F40000000000000000000001 /* Poeditcal.app */;
 			productType = "com.apple.product-type.application";
 		};
 		E20000000000000000000002 /* PoetAudioTests */ = {
@@ -317,6 +329,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A1000000000000000000001F /* Branding.swift in Sources */,
 				A10000000000000000000012 /* AIDenoiser.swift in Sources */,
 				A10000000000000000000014 /* AdaptiveDeEsser.swift in Sources */,
 				A10000000000000000000015 /* ProjectDocument.swift in Sources */,
@@ -326,6 +339,9 @@
 				A10000000000000000000019 /* AnalysisFirstPassRenderer.swift in Sources */,
 				A1000000000000000000001A /* PauseAnalyzer.swift in Sources */,
 				A1000000000000000000001B /* SmartEditModelStore.swift in Sources */,
+				A1000000000000000000001C /* VideoMedia.swift in Sources */,
+				A1000000000000000000001D /* EditableTimelineRenderer.swift in Sources */,
+				A1000000000000000000001E /* ClipTimelineView.swift in Sources */,
 				A10000000000000000000001 /* AppModel.swift in Sources */,
 				A10000000000000000000002 /* AudioRenderer.swift in Sources */,
 				A10000000000000000000003 /* AudioSignalAnalyzer.swift in Sources */,
@@ -470,7 +486,7 @@
 				EXECUTABLE_NAME = PoetAudio;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Packaging/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = "Poet Audio";
+				INFOPLIST_KEY_CFBundleDisplayName = Poeditcal;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -489,7 +505,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.poetaudio.mac;
 				PRODUCT_MODULE_NAME = PoetAudio;
-				PRODUCT_NAME = "Poet Audio";
+				PRODUCT_NAME = Poeditcal;
 				SUPPORTED_PLATFORMS = macosx;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 			};
@@ -512,7 +528,7 @@
 				EXECUTABLE_NAME = PoetAudio;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Packaging/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = "Poet Audio";
+				INFOPLIST_KEY_CFBundleDisplayName = Poeditcal;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -531,7 +547,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.poetaudio.mac;
 				PRODUCT_MODULE_NAME = PoetAudio;
-				PRODUCT_NAME = "Poet Audio";
+				PRODUCT_NAME = Poeditcal;
 				SUPPORTED_PLATFORMS = macosx;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 			};
@@ -548,7 +564,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.poetaudio.mac.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 6.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Poet Audio.app/Contents/MacOS/PoetAudio";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Poeditcal.app/Contents/MacOS/PoetAudio";
 			};
 			name = Debug;
 		};
@@ -563,7 +579,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.poetaudio.mac.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 6.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Poet Audio.app/Contents/MacOS/PoetAudio";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Poeditcal.app/Contents/MacOS/PoetAudio";
 			};
 			name = Release;
 		};

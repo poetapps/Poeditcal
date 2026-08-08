@@ -3,84 +3,42 @@ import SwiftUI
 struct ProcessingView: View {
     @EnvironmentObject private var model: AppModel
 
+    private let stages = [
+        "Preparing your recording",
+        "Creating a clean first pass",
+        "Transcribing every word",
+        "Recovering natural speech",
+        "Finding retakes and pauses",
+        "Preparing your review"
+    ]
+
     var body: some View {
-        VStack(spacing: 36) {
-            Spacer()
-
+        Group {
             if let error = model.processingError {
+                VStack(spacing: 36) {
+                    Spacer()
                 errorState(error)
-                Spacer()
+                    Spacer()
+                }
+                .padding(.horizontal, 40)
             } else {
-                ZStack {
-                    Circle().stroke(PoetTheme.elevated, lineWidth: 1).frame(width: 112, height: 112)
-                    Circle()
-                        .trim(from: 0, to: model.processingProgress)
-                        .stroke(PoetTheme.sage, style: StrokeStyle(lineWidth: 3, lineCap: .round))
-                        .rotationEffect(.degrees(-90))
-                        .frame(width: 112, height: 112)
-                        .animation(.easeOut(duration: 0.18), value: model.processingProgress)
-                    VStack(spacing: 2) {
-                        Text("\(Int(model.processingProgress * 100))%")
-                            .font(PoetTheme.editorial(24))
-                        Text("LOCAL")
-                            .font(PoetTheme.utility(8, weight: .bold))
-                            .tracking(1.3)
-                            .foregroundStyle(PoetTheme.sage)
-                    }
-                }
-
-                VStack(spacing: 10) {
-                    Text(model.processingLabel)
-                        .font(PoetTheme.editorial(34))
-                    Text(model.fileName)
-                        .font(PoetTheme.utility(13))
-                        .foregroundStyle(PoetTheme.muted)
-                }
-
-                VStack(spacing: 0) {
-                    GeometryReader { geometry in
-                        ZStack(alignment: .leading) {
-                            Capsule().fill(PoetTheme.elevated)
-                            Capsule().fill(PoetTheme.sage).frame(width: geometry.size.width * model.processingProgress)
-                        }
-                    }
-                    .frame(height: 7)
-
-                    HStack {
-                        Text("IMPORT")
-                        Spacer()
-                        Text("TRANSCRIPT")
-                        Spacer()
-                        Text(model.editingMode == .autopilot && model.usePolish ? "POLISH" : "ROUGH CUT")
-                    }
-                    .font(PoetTheme.utility(9, weight: .bold))
-                    .tracking(1)
-                    .foregroundStyle(PoetTheme.faint)
-                    .padding(.top, 12)
-                }
-                .frame(maxWidth: 560)
-
-                PoetCard(padding: 18) {
-                    HStack(spacing: 13) {
-                        Image(systemName: "lightbulb.min")
-                            .font(.system(size: 15, weight: .medium))
-                            .foregroundStyle(PoetTheme.sage)
-                        Text(model.processingTip)
-                            .font(PoetTheme.utility(12))
-                            .foregroundStyle(PoetTheme.muted)
-                        Spacer(minLength: 0)
-                    }
-                }
-                .frame(maxWidth: 560)
-
-                Spacer()
-                Text("Your recording stays on this Mac.")
-                    .font(PoetTheme.utility(11, weight: .medium))
-                    .foregroundStyle(PoetTheme.faint)
-                    .padding(.bottom, 28)
+                WorkflowProgressView(
+                    title: "Preparing your edit",
+                    stages: stages,
+                    currentStage: stageIndex(for: model.processingLabel)
+                )
             }
         }
-        .padding(.horizontal, 40)
+    }
+
+    private func stageIndex(for label: String) -> Int {
+        let raw = label.lowercased()
+        if raw.contains("review") { return 5 }
+        if raw.contains("retake") || raw.contains("filler") || raw.contains("restart") || raw.contains("pause") || raw.contains("understanding") { return 4 }
+        if raw.contains("recover") || raw.contains("um") || raw.contains("uh") { return 3 }
+        if raw.contains("transcrib") || raw.contains("parakeet") || raw.contains("loading your recording") { return 2 }
+        if raw.contains("clean first pass") { return 1 }
+        return 0
     }
 
     @ViewBuilder

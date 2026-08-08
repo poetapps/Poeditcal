@@ -1,4 +1,4 @@
-name: Release Poet Audio
+name: Release Poeditcal
 
 on:
   push:
@@ -108,7 +108,7 @@ jobs:
 
       - name: Verify signed app
         run: |
-          APP_PATH="$RUNNER_TEMP/export/Poet Audio.app"
+          APP_PATH="$RUNNER_TEMP/export/Poeditcal.app"
           test -d "$APP_PATH"
           codesign --verify --deep --strict --verbose=2 "$APP_PATH"
           test -d "$APP_PATH/Contents/Frameworks/Sparkle.framework"
@@ -139,8 +139,8 @@ jobs:
           API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          APP_PATH="$RUNNER_TEMP/export/Poet Audio.app"
-          DMG_PATH="$RUNNER_TEMP/Poet-Audio-${VERSION}.dmg"
+          APP_PATH="$RUNNER_TEMP/export/Poeditcal.app"
+          DMG_PATH="$RUNNER_TEMP/Poeditcal-${VERSION}.dmg"
           API_KEY_PATH="$RUNNER_TEMP/AuthKey_${API_KEY_ID}.p8"
 
           printf '%s' "$API_KEY_P8" | base64 -D > "$API_KEY_PATH"
@@ -164,9 +164,9 @@ jobs:
           DOWNLOAD_PREFIX="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/"
           mkdir -p "$UPDATE_DIR"
           cp "$DMG_PATH" "$UPDATE_DIR/"
-          cp "ReleaseNotes/${VERSION}.md" "$UPDATE_DIR/Poet-Audio-${VERSION}.md"
+          cp "ReleaseNotes/${VERSION}.md" "$UPDATE_DIR/Poeditcal-${VERSION}.md"
           if ! curl --fail --silent --show-error \
-            "https://poetapps.github.io/PoetAudio/appcast.xml" \
+            "https://poetapps.github.io/Poeditcal/appcast.xml" \
             -o "$UPDATE_DIR/appcast.xml"; then
             rm -f "$UPDATE_DIR/appcast.xml"
           fi
@@ -189,15 +189,15 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" "$DMG_PATH#Poet Audio ${VERSION}" --clobber
+            gh release upload "$GITHUB_REF_NAME" "$DMG_PATH#Poeditcal ${VERSION}" --clobber
             gh release edit "$GITHUB_REF_NAME" \
-              --title "Poet Audio ${VERSION}" \
+              --title "Poeditcal ${VERSION}" \
               --notes-file "ReleaseNotes/${VERSION}.md"
           else
             gh release create "$GITHUB_REF_NAME" \
-              "$DMG_PATH#Poet Audio ${VERSION}" \
+              "$DMG_PATH#Poeditcal ${VERSION}" \
               --verify-tag \
-              --title "Poet Audio ${VERSION}" \
+              --title "Poeditcal ${VERSION}" \
               --notes-file "ReleaseNotes/${VERSION}.md"
           fi
 

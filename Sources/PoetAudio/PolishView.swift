@@ -1,3 +1,4 @@
+import AVKit
 import SwiftUI
 
 struct PolishView: View {
@@ -209,8 +210,6 @@ private struct PolishOptionRow: View {
 private struct PolishPreviewPage: View {
     @EnvironmentObject private var model: AppModel
 
-    private let levels: [CGFloat] = [0.22, 0.48, 0.74, 0.38, 0.58, 0.88, 0.44, 0.68, 0.32, 0.8, 0.52, 0.7, 0.4, 0.86, 0.3, 0.62, 0.78, 0.46, 0.66, 0.36, 0.82, 0.54, 0.72, 0.42, 0.64, 0.34, 0.76, 0.5]
-
     var body: some View {
         VStack(spacing: 30) {
             Spacer(minLength: 56)
@@ -235,6 +234,30 @@ private struct PolishPreviewPage: View {
             .frame(width: 270)
 
             VStack(spacing: 22) {
+                if let videoPlayer = model.videoPreviewPlayer {
+                    ZStack {
+                        VideoPlayer(player: videoPlayer)
+                            .aspectRatio(
+                                model.videoInfo.map { CGFloat($0.width) / CGFloat(max(1, $0.height)) } ?? (16 / 9),
+                                contentMode: .fit
+                            )
+                            .frame(maxHeight: 320)
+                            .background(Color.black)
+                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            .allowsHitTesting(false)
+
+                        Button { model.togglePlayback() } label: {
+                            Image(systemName: model.isPlaying ? "pause.fill" : "play.fill")
+                                .font(.system(size: 19, weight: .bold))
+                                .foregroundStyle(PoetTheme.background)
+                                .frame(width: 62, height: 62)
+                                .background(PoetTheme.sage)
+                                .clipShape(Circle())
+                                .shadow(color: .black.opacity(0.35), radius: 16, y: 6)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                } else {
                 Button { model.togglePlayback() } label: {
                     Image(systemName: model.isPlaying ? "pause.fill" : "play.fill")
                         .font(.system(size: 19, weight: .bold))
@@ -244,27 +267,13 @@ private struct PolishPreviewPage: View {
                         .clipShape(Circle())
                 }
                 .buttonStyle(.plain)
-
-                GeometryReader { geometry in
-                    let playbackProgress = min(max(model.currentTime / max(model.estimatedEditedDuration, 0.01), 0), 1)
-                    HStack(alignment: .center, spacing: 4) {
-                        ForEach(Array(levels.enumerated()), id: \.offset) { index, level in
-                            Capsule()
-                                .fill(Double(index) / Double(levels.count) <= playbackProgress ? PoetTheme.sage : PoetTheme.faint.opacity(0.42))
-                                .frame(maxWidth: .infinity)
-                                .frame(height: 5 + level * 38)
-                        }
-                    }
-                    .contentShape(Rectangle())
-                    .gesture(DragGesture(minimumDistance: 0).onChanged { value in
-                        let ratio = min(max(value.location.x / geometry.size.width, 0), 1)
-                        model.seek(to: ratio * model.estimatedEditedDuration)
-                    })
                 }
-                .frame(height: 48)
+
+                ClipTimelineView()
+                    .frame(height: 54)
 
                 HStack {
-                    Text(clock(model.currentTime))
+                    Text(clock(model.timelineCurrentTime))
                     Spacer()
                     Text(clock(model.estimatedEditedDuration))
                 }
@@ -272,7 +281,7 @@ private struct PolishPreviewPage: View {
                 .foregroundStyle(PoetTheme.muted)
             }
             .padding(26)
-            .frame(maxWidth: 700)
+            .frame(maxWidth: model.isVideoProject ? 760 : 700)
             .background(PoetTheme.card)
             .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
 
@@ -334,8 +343,6 @@ private struct PreviewChoiceStyle: ButtonStyle {
 private struct PolishingProgressView: View {
     @EnvironmentObject private var model: AppModel
 
-    @State private var visibleStage = 0
-
     private let stages = [
         "Preparing the edit",
         "Reducing room noise",
@@ -346,21 +353,50 @@ private struct PolishingProgressView: View {
     ]
 
     var body: some View {
+        WorkflowProgressView(
+            title: "Polishing your take",
+            stages: stages,
+            currentStage: stageIndex(for: model.polishCurrentStage)
+        )
+    }
+
+    private func stageIndex(for stage: String?) -> Int {
+        let raw = (stage ?? "").lowercased()
+        if raw.contains("noise") || raw.contains("denois") { return 1 }
+        if raw.contains("baseline") { return 2 }
+        if raw.contains("loudness") || raw.contains("normal") || raw.contains("quality") { return 5 }
+        if raw.contains("de-ess") || raw.contains("sibil") { return 3 }
+        if raw.contains("breath") { return 4 }
+        if raw.contains("eq") || raw.contains("voice") { return 2 }
+        if raw.contains("compare") || raw.contains("gentle") || raw.contains("compression") { return 4 }
+        return 0
+    }
+}
+
+struct WorkflowProgressView: View {
+    let title: String
+    let stages: [String]
+    let currentStage: Int
+
+    @State private var visibleStage = 0
+
+    var body: some View {
         VStack(spacing: 38) {
             Spacer()
-            Text("Polishing your take")
+
+            Text(title)
                 .font(PoetTheme.editorial(34, weight: .regular))
 
             VStack(spacing: 15) {
                 ForEach(stages.indices, id: \.self) { index in
-                    PolishingStageText(
+                    WorkflowStageText(
                         text: stages[index],
                         isActive: index == visibleStage,
                         inactiveOpacity: distanceOpacity(index)
                     )
-                        .scaleEffect(index == visibleStage ? 1 : 0.625)
-                        .offset(y: CGFloat(index - visibleStage) * 2)
-                        .frame(height: index == visibleStage ? 29 : 18)
+                    .scaleEffect(index == visibleStage ? 1 : 0.625)
+                    .offset(y: CGFloat(index - visibleStage) * 2)
+                    .frame(height: index == visibleStage ? 29 : 18)
                 }
             }
             .frame(height: 220)
@@ -379,40 +415,31 @@ private struct PolishingProgressView: View {
             Text("Your recording stays on this Mac.")
                 .font(PoetTheme.utility(11))
                 .foregroundStyle(PoetTheme.faint)
+
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onAppear { advance(to: stageIndex(for: model.polishCurrentStage)) }
-        .onChange(of: model.polishCurrentStage) { _, stage in
-            advance(to: stageIndex(for: stage))
-        }
+        .onAppear { advance(to: currentStage) }
+        .onChange(of: currentStage) { _, stage in advance(to: stage) }
     }
 
-    private var progress: Double { Double(visibleStage + 1) / Double(stages.count) }
+    private var progress: Double {
+        Double(visibleStage + 1) / Double(max(stages.count, 1))
+    }
 
     private func distanceOpacity(_ index: Int) -> Double {
         max(0.22, 0.72 - Double(abs(index - visibleStage)) * 0.18)
     }
 
     private func advance(to next: Int) {
-        guard next > visibleStage else { return }
-        visibleStage = next
-    }
-
-    private func stageIndex(for stage: String?) -> Int {
-        let raw = (stage ?? "").lowercased()
-        if raw.contains("noise") || raw.contains("denois") { return 1 }
-        if raw.contains("baseline") { return 2 }
-        if raw.contains("loudness") || raw.contains("normal") || raw.contains("quality") { return 5 }
-        if raw.contains("de-ess") || raw.contains("sibil") { return 3 }
-        if raw.contains("breath") { return 4 }
-        if raw.contains("eq") || raw.contains("voice") { return 2 }
-        if raw.contains("compare") || raw.contains("gentle") || raw.contains("compression") { return 4 }
-        return 0
+        guard !stages.isEmpty else { return }
+        let boundedStage = min(max(next, 0), stages.count - 1)
+        guard boundedStage > visibleStage else { return }
+        visibleStage = boundedStage
     }
 }
 
-private struct PolishingStageText: View {
+private struct WorkflowStageText: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     let text: String

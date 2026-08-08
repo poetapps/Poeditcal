@@ -6,12 +6,16 @@ extension UTType {
 }
 
 struct PoetProjectSnapshot: Codable, Equatable, Sendable {
-    static let currentVersion = 2
+    static let currentVersion = 3
 
     var version = currentVersion
     var projectName: String
     var sourceAudioFile: String
     var firstPassAudioFile: String? = nil
+    var sourceVideoFile: String? = nil
+    var videoFrameRate: Double? = nil
+    var videoWidth: Int? = nil
+    var videoHeight: Int? = nil
     var sourceDisplayName: String
     var phase: WorkflowPhase
     var editingMode: EditingMode
@@ -30,21 +34,26 @@ struct PoetProjectSnapshot: Codable, Equatable, Sendable {
     var exportTXT: Bool
     var exportSRT: Bool
     var exportVTT: Bool
+    var exportEditableTimelines: Bool? = nil
+    var exportFinishedVideo: Bool? = nil
 }
 
 enum PoetProjectError: LocalizedError {
     case unsupportedVersion(Int)
     case missingManifest
     case missingAudio(String)
+    case missingMedia(String)
 
     var errorDescription: String? {
         switch self {
         case .unsupportedVersion(let version):
-            "This project was made by a newer version of Poet Audio (format \(version))."
+            "This project was made by a newer version of Poeditcal (format \(version))."
         case .missingManifest:
             "This .poe project does not contain a project manifest."
         case .missingAudio(let name):
             "The project’s source recording is missing (\(name))."
+        case .missingMedia(let name):
+            "The project’s source media is missing (\(name))."
         }
     }
 }
@@ -56,6 +65,7 @@ enum PoetProjectStore {
         snapshot: PoetProjectSnapshot,
         sourceAudioURL: URL,
         firstPassAudioURL: URL? = nil,
+        sourceVideoURL: URL? = nil,
         to requestedURL: URL
     ) throws -> URL {
         let destination = requestedURL.pathExtension.lowercased() == "poe"
@@ -77,6 +87,13 @@ enum PoetProjectStore {
                 try manager.copyItem(
                     at: firstPassAudioURL,
                     to: staging.appendingPathComponent(firstPassAudioFile)
+                )
+            }
+            if let sourceVideoFile = snapshot.sourceVideoFile,
+               let sourceVideoURL {
+                try manager.copyItem(
+                    at: sourceVideoURL,
+                    to: staging.appendingPathComponent(sourceVideoFile)
                 )
             }
 
@@ -101,7 +118,8 @@ enum PoetProjectStore {
     static func load(from packageURL: URL) throws -> (
         snapshot: PoetProjectSnapshot,
         audioURL: URL,
-        firstPassAudioURL: URL?
+        firstPassAudioURL: URL?,
+        videoURL: URL?
     ) {
         let manifestURL = packageURL.appendingPathComponent(manifestName)
         guard FileManager.default.fileExists(atPath: manifestURL.path) else {
@@ -117,6 +135,11 @@ enum PoetProjectStore {
         }
         let firstPassAudioURL = snapshot.firstPassAudioFile.map { packageURL.appendingPathComponent($0) }
             .flatMap { FileManager.default.fileExists(atPath: $0.path) ? $0 : nil }
-        return (snapshot, audioURL, firstPassAudioURL)
+        let videoURL = snapshot.sourceVideoFile.map { packageURL.appendingPathComponent($0) }
+            .flatMap { FileManager.default.fileExists(atPath: $0.path) ? $0 : nil }
+        if let sourceVideoFile = snapshot.sourceVideoFile, videoURL == nil {
+            throw PoetProjectError.missingMedia(sourceVideoFile)
+        }
+        return (snapshot, audioURL, firstPassAudioURL, videoURL)
     }
 }

@@ -1,6 +1,6 @@
-# Releasing Poet Audio
+# Releasing Poeditcal
 
-Poet Audio releases are built by GitHub Actions from version tags. The workflow signs the app with a Developer ID certificate, notarizes it with Apple, creates and notarizes a DMG, publishes a GitHub Release, signs a Sparkle appcast, and deploys the feed to GitHub Pages.
+Poeditcal releases are built by GitHub Actions from version tags. The workflow signs the app with a Developer ID certificate, notarizes it with Apple, creates and notarizes a DMG, publishes a GitHub Release, signs a Sparkle appcast, and deploys the feed to GitHub Pages.
 
 ## One-time account setup
 
@@ -28,7 +28,9 @@ Authenticate GitHub CLI using browser login, then add these Actions secrets in *
 | `APPLE_API_ISSUER_ID` | App Store Connect Issuer ID |
 | `SPARKLE_PRIVATE_KEY` | Sparkle EdDSA private key exported by `generate_keys` |
 
-Enable GitHub Pages for the repository and select **GitHub Actions** as the source. The published feed URL is `https://poetapps.github.io/PoetAudio/appcast.xml`.
+Enable GitHub Pages for the repository and select **GitHub Actions** as the source. The published feed URL is `https://poetapps.github.io/Poeditcal/appcast.xml`.
+
+The Xcode project, bundle identifier, executable/module names, project UTI, and signing assets retain their original `PoetAudio`/`com.poetaudio` identifiers for update, document, and installation compatibility. They are internal identifiers; the GitHub repository, update feed, built product, and all customer-facing release labels use Poeditcal.
 
 ## Publish a release
 
@@ -42,7 +44,7 @@ Example for the first release:
 
 ```sh
 ./Scripts/validate-release.sh v1.0.0
-git tag -a v1.0.0 -m "Poet Audio 1.0.0"
+git tag -a v1.0.0 -m "Poeditcal 1.0.0"
 git push origin main
 git push origin v1.0.0
 ```
@@ -51,4 +53,4 @@ The tag starts `.github/workflows/release.yml`. Do not create the GitHub Release
 
 ## Verify
 
-Download the DMG from the GitHub Release on a Mac that does not have the development certificate. Install and launch Poet Audio, then use **Poet Audio → Check for Updates…**. A newly installed current version should report that it is up to date. Test a later version with a higher build number to verify the complete update path.
+Download the DMG from the GitHub Release on a Mac that does not have the development certificate. Install and launch Poeditcal, then use **Poeditcal → Check for Updates…**. A newly installed current version should report that it is up to date. Test a later version with a higher build number to verify the complete update path.

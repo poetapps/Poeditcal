@@ -4,11 +4,11 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
-APP_DIR="$PROJECT_ROOT/.build/PoetAudio.app"
+APP_DIR="$PROJECT_ROOT/.build/Poeditcal.app"
 DERIVED_DATA="$PROJECT_ROOT/.build/LocalPackageDerivedData"
-BUILT_APP="$DERIVED_DATA/Build/Products/Release/Poet Audio.app"
+BUILT_APP="$DERIVED_DATA/Build/Products/Release/Poeditcal.app"
 
-if [[ "$APP_DIR" != "$PROJECT_ROOT/.build/PoetAudio.app" ]]; then
+if [[ "$APP_DIR" != "$PROJECT_ROOT/.build/Poeditcal.app" ]]; then
     echo "Refusing to replace unexpected app path: $APP_DIR" >&2
     exit 1
 fi

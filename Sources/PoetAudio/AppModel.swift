@@ -140,6 +140,9 @@ final class AppModel: ObservableObject {
     @Published var pacing: PacingPreset = .natural
     @Published var pauseDuration: Double = 0.7
     @Published var audioURL: URL?
+    @Published var videoURL: URL?
+    @Published var videoInfo: VideoMediaInfo?
+    @Published var videoPreviewPlayer: AVPlayer?
     @Published var fileName = ""
     @Published var duration: TimeInterval = 0
     @Published var processingProgress = 0.0
@@ -165,8 +168,11 @@ final class AppModel: ObservableObject {
     @Published var exportTXT = true
     @Published var exportSRT = true
     @Published var exportVTT = false
+    @Published var exportEditableTimelines = false
+    @Published var exportFinishedVideo = false
     @Published var exportStatus: String?
     @Published var isExporting = false
+    @Published var isPreparingMedia = false
     @Published var exportProgress = 0.0
     @Published var voiceAnalysis: VoiceAnalysis?
     @Published var polishPreviewMode: PolishPreviewMode = .polished
@@ -193,6 +199,8 @@ final class AppModel: ObservableObject {
     private var player: AVAudioPlayer?
     private var playbackTask: Task<Void, Never>?
     private var processingTask: Task<Void, Never>?
+    private var mediaPreparationTask: Task<Void, Never>?
+    private var mediaPreparationID: UUID?
     private let speechTranscriber = LocalSpeechTranscriber()
     private var securityScopedURL: URL?
     private var selectionAnchorID: UUID?
@@ -209,6 +217,7 @@ final class AppModel: ObservableObject {
     private var restoreAllSnapshot: [Bool]?
     private var restoreAllPauseSnapshot: [(isCompacted: Bool, isProtected: Bool)]?
     private var firstPassFolder: URL?
+    private var videoAudioFolder: URL?
     private var usesAcousticPauseDecisions = false
 
     private static let defaultPolishIntensities: [PolishOption: PolishIntensity] = [
@@ -229,7 +238,11 @@ final class AppModel: ObservableObject {
 
     var removedWords: Int { words.filter(\.isRemoved).count }
     var restoredWords: Int { words.filter { $0.wasSuggested && !$0.isRemoved }.count }
-    var compactedPauses: Int { pauseDecisions.count(where: { $0.isCompacted && !$0.isProtected }) }
+    var compactedPauses: Int {
+        pauseDecisions.count(where: {
+            $0.isCompacted && !$0.isProtected && $0.originalDuration > pauseDuration + 0.002
+        })
+    }
     var originalWordCount: Int { words.count }
     var editedWordCount: Int { words.filter { !$0.isRemoved }.count }
     var selectedWordCount: Int { selectedWordIDs.count }
@@ -237,11 +250,24 @@ final class AppModel: ObservableObject {
         AudioEditPlanner.editedDuration(for: currentKeptRanges)
     }
 
+    /// The non-destructive source ranges arranged on the compacted edit timeline.
+    /// Views use these ranges to draw real clips instead of a decorative waveform.
+    var timelineClips: [AudioTimeRange] { currentKeptRanges }
+
+    var timelineCurrentTime: TimeInterval {
+        if playbackUsesEditedTimeline { return min(max(currentTime, 0), estimatedEditedDuration) }
+        return AudioEditPlanner.editedTime(for: currentTime, keptRanges: currentKeptRanges)
+    }
+
     var editedTranscript: String {
         words.filter { !$0.isRemoved }.map(\.text).joined(separator: " ")
     }
 
-    var hasExportSelection: Bool { exportAudio || exportOriginal || exportTXT || exportSRT || exportVTT }
+    var hasExportSelection: Bool {
+        exportAudio || exportOriginal || exportTXT || exportSRT || exportVTT ||
+            exportEditableTimelines || exportFinishedVideo
+    }
+    var isVideoProject: Bool { videoURL != nil }
     var enabledPolishCount: Int { usePolish ? polishSelections.count : 0 }
     var hasAppliedPolishPreview: Bool {
         polishPreviewSignature == currentPolishSignature && polishedPreviewURL != nil
@@ -258,21 +284,99 @@ final class AppModel: ObservableObject {
     }
 
     func loadAudio(_ url: URL) {
+        beginLoadingSource(at: url)
+        videoURL = nil
+        videoInfo = nil
+        videoPreviewPlayer = nil
+        exportEditableTimelines = false
+        exportFinishedVideo = false
+        installAudioSource(url, displayURL: url)
+    }
+
+    func loadMedia(_ url: URL) {
+        if SourceMediaInspector.kind(for: url) == .video { loadVideo(url) }
+        else { loadAudio(url) }
+    }
+
+    private func loadVideo(_ url: URL) {
+        beginLoadingSource(at: url)
+        isPreparingMedia = true
+        processingError = nil
+        processingLabel = "Preparing video audio"
+        processingTip = "The original video stays untouched and remains the source for every cut."
+        phase = .processing
+        let preparationID = UUID()
+        mediaPreparationID = preparationID
+        mediaPreparationTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let info = try await SourceMediaInspector.inspectVideo(at: url)
+                let folder = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("PoetVideoAudio-\(UUID().uuidString)", isDirectory: true)
+                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                let extractedAudio = folder.appendingPathComponent("source-audio.m4a")
+                do {
+                    try await VideoAudioExtractor.extractFullLengthAudio(from: url, to: extractedAudio)
+                } catch {
+                    try? FileManager.default.removeItem(at: folder)
+                    throw error
+                }
+                guard !Task.isCancelled, mediaPreparationID == preparationID else {
+                    try? FileManager.default.removeItem(at: folder)
+                    return
+                }
+                if let videoAudioFolder { try? FileManager.default.removeItem(at: videoAudioFolder) }
+                videoAudioFolder = folder
+                videoURL = url
+                videoInfo = info
+                let previewPlayer = AVPlayer(url: url)
+                previewPlayer.isMuted = true
+                videoPreviewPlayer = previewPlayer
+                exportEditableTimelines = true
+                exportFinishedVideo = false
+                installAudioSource(extractedAudio, displayURL: url)
+                duration = info.duration
+            } catch {
+                guard mediaPreparationID == preparationID else { return }
+                if !Task.isCancelled { processingError = error.localizedDescription }
+                if let securityScopedURL { securityScopedURL.stopAccessingSecurityScopedResource() }
+                securityScopedURL = nil
+                phase = .welcome
+            }
+            isPreparingMedia = false
+            mediaPreparationTask = nil
+            mediaPreparationID = nil
+        }
+    }
+
+    private func beginLoadingSource(at url: URL) {
         stopPlayback()
         discardPolishPreview()
         discardFirstPass()
+        if let videoAudioFolder { try? FileManager.default.removeItem(at: videoAudioFolder) }
+        videoAudioFolder = nil
         processingTask?.cancel()
+        mediaPreparationTask?.cancel()
+        mediaPreparationTask = nil
+        mediaPreparationID = nil
         speechTranscriber.cancel()
         if let securityScopedURL { securityScopedURL.stopAccessingSecurityScopedResource() }
         if url.startAccessingSecurityScopedResource() { securityScopedURL = url }
         else { securityScopedURL = nil }
+        audioURL = nil
+        videoURL = nil
+        videoInfo = nil
+        videoPreviewPlayer = nil
+    }
+
+    private func installAudioSource(_ url: URL, displayURL: URL) {
         audioURL = url
         projectURL = nil
-        projectName = url.deletingPathExtension().lastPathComponent
+        projectName = displayURL.deletingPathExtension().lastPathComponent
         projectStatus = nil
         exportAudio = true
         exportOriginal = false
-        fileName = url.lastPathComponent
+        fileName = displayURL.lastPathComponent
         exportStatus = nil
         processingError = nil
         firstPassStatus = nil
@@ -303,7 +407,7 @@ final class AppModel: ObservableObject {
 
     func openURL(_ url: URL) {
         if url.pathExtension.lowercased() == "poe" { openProject(url) }
-        else { loadAudio(url) }
+        else { loadMedia(url) }
     }
 
     func openProjectPanel() {
@@ -331,6 +435,7 @@ final class AppModel: ObservableObject {
                     loaded.snapshot,
                     audioURL: loaded.audioURL,
                     firstPassAudioURL: loaded.firstPassAudioURL,
+                    videoURL: loaded.videoURL,
                     packageURL: url,
                     accessed: accessed
                 )
@@ -366,11 +471,20 @@ final class AppModel: ObservableObject {
         let audioExtension = sourceURL.pathExtension.isEmpty ? "m4a" : sourceURL.pathExtension.lowercased()
         let sourceAudioFile = "Source Audio.\(audioExtension)"
         let firstPassAudioFile = firstPassAudioURL == nil ? nil : "Analysis First Pass.wav"
+        let sourceVideoFile = videoURL.map {
+            let ext = $0.pathExtension.isEmpty ? "mov" : $0.pathExtension.lowercased()
+            return "Source Video.\(ext)"
+        }
         let analysisPassURL = firstPassAudioURL
+        let sourceVideoURL = videoURL
         let snapshot = PoetProjectSnapshot(
             projectName: projectName,
             sourceAudioFile: sourceAudioFile,
             firstPassAudioFile: firstPassAudioFile,
+            sourceVideoFile: sourceVideoFile,
+            videoFrameRate: videoInfo?.frameRate,
+            videoWidth: videoInfo?.width,
+            videoHeight: videoInfo?.height,
             sourceDisplayName: fileName,
             phase: phase,
             editingMode: editingMode,
@@ -388,7 +502,9 @@ final class AppModel: ObservableObject {
             exportOriginal: exportOriginal,
             exportTXT: exportTXT,
             exportSRT: exportSRT,
-            exportVTT: exportVTT
+            exportVTT: exportVTT,
+            exportEditableTimelines: exportEditableTimelines,
+            exportFinishedVideo: exportFinishedVideo
         )
         isSavingProject = true
         projectStatus = "Saving project…"
@@ -400,16 +516,26 @@ final class AppModel: ObservableObject {
                         snapshot: snapshot,
                         sourceAudioURL: sourceURL,
                         firstPassAudioURL: analysisPassURL,
+                        sourceVideoURL: sourceVideoURL,
                         to: url
                     )
                 }.value
                 let savedAudioURL = savedURL.appendingPathComponent(sourceAudioFile)
                 let savedFirstPassURL = firstPassAudioFile.map { savedURL.appendingPathComponent($0) }
+                let savedVideoURL = sourceVideoFile.map { savedURL.appendingPathComponent($0) }
                 if let securityScopedURL { securityScopedURL.stopAccessingSecurityScopedResource() }
                 _ = savedURL.startAccessingSecurityScopedResource()
                 securityScopedURL = savedURL
                 projectURL = savedURL
                 audioURL = savedAudioURL
+                videoURL = savedVideoURL
+                if let savedVideoURL {
+                    let previewPlayer = AVPlayer(url: savedVideoURL)
+                    previewPlayer.isMuted = true
+                    videoPreviewPlayer = previewPlayer
+                }
+                if let videoAudioFolder { try? FileManager.default.removeItem(at: videoAudioFolder) }
+                videoAudioFolder = nil
                 if let firstPassFolder { try? FileManager.default.removeItem(at: firstPassFolder) }
                 firstPassFolder = nil
                 firstPassAudioURL = savedFirstPassURL
@@ -429,12 +555,15 @@ final class AppModel: ObservableObject {
         _ snapshot: PoetProjectSnapshot,
         audioURL loadedAudioURL: URL,
         firstPassAudioURL loadedFirstPassAudioURL: URL?,
+        videoURL loadedVideoURL: URL?,
         packageURL: URL,
         accessed: Bool
     ) {
         stopPlayback()
         discardPolishPreview()
         discardFirstPass()
+        if let videoAudioFolder { try? FileManager.default.removeItem(at: videoAudioFolder) }
+        videoAudioFolder = nil
         processingTask?.cancel()
         speechTranscriber.cancel()
         if let securityScopedURL { securityScopedURL.stopAccessingSecurityScopedResource() }
@@ -442,6 +571,24 @@ final class AppModel: ObservableObject {
         projectURL = packageURL
         projectName = snapshot.projectName
         audioURL = loadedAudioURL
+        videoURL = loadedVideoURL
+        if loadedVideoURL != nil {
+            videoInfo = VideoMediaInfo(
+                duration: snapshot.duration,
+                frameRate: snapshot.videoFrameRate ?? 30,
+                width: snapshot.videoWidth ?? 1920,
+                height: snapshot.videoHeight ?? 1080
+            )
+        } else {
+            videoInfo = nil
+        }
+        if let loadedVideoURL {
+            let previewPlayer = AVPlayer(url: loadedVideoURL)
+            previewPlayer.isMuted = true
+            videoPreviewPlayer = previewPlayer
+        } else {
+            videoPreviewPlayer = nil
+        }
         firstPassAudioURL = loadedFirstPassAudioURL
         editPreviewMode = loadedFirstPassAudioURL == nil ? .original : .firstPass
         firstPassStatus = loadedFirstPassAudioURL == nil ? nil : "Timing-aligned first pass ready"
@@ -463,6 +610,8 @@ final class AppModel: ObservableObject {
         exportTXT = snapshot.exportTXT
         exportSRT = snapshot.exportSRT
         exportVTT = snapshot.exportVTT
+        exportEditableTimelines = snapshot.exportEditableTimelines ?? (loadedVideoURL != nil)
+        exportFinishedVideo = snapshot.exportFinishedVideo ?? false
         isDemoTranscript = false
         processingError = nil
         exportStatus = nil
@@ -499,7 +648,7 @@ final class AppModel: ObservableObject {
                 granted = permission == .authorized
             }
             guard granted else {
-                recordingError = "Microphone access is off. Enable it for Poet Audio in System Settings → Privacy & Security → Microphone."
+                recordingError = "Microphone access is off. Enable it for Poeditcal in System Settings → Privacy & Security → Microphone."
                 return
             }
             beginRecording()
@@ -575,6 +724,8 @@ final class AppModel: ObservableObject {
         speechTranscriber.cancel()
         discardFirstPass()
         processingError = nil
+        processingLabel = "Preparing your audio"
+        processingTip = "A little room tone helps noise reduction sound more natural."
         firstPassStatus = "Preparing a timing-aligned first pass"
         pauseDecisions = []
         phase = .processing
@@ -670,12 +821,13 @@ final class AppModel: ObservableObject {
                 processingProgress = 0.8
                 processingLabel = "Confirming real pauses"
                 let analyzedWords = words
-                let selectedPauseDuration = pauseDuration
                 async let pauses = Task.detached(priority: .userInitiated) {
                     try? PauseAnalyzer.analyze(
                         sourceURL: url,
                         words: analyzedWords,
-                        maximumPause: selectedPauseDuration
+                        // Analyze down to the editor's tightest supported value
+                        // so later slider changes never need to rescan the audio.
+                        maximumPause: 0.2
                     )
                 }.value
                 voiceAnalysis = await earlyAnalysis
@@ -703,6 +855,17 @@ final class AppModel: ObservableObject {
     }
 
     func cancelProcessing() {
+        if isPreparingMedia {
+            mediaPreparationTask?.cancel()
+            mediaPreparationTask = nil
+            mediaPreparationID = nil
+            isPreparingMedia = false
+            processingError = nil
+            if let securityScopedURL { securityScopedURL.stopAccessingSecurityScopedResource() }
+            securityScopedURL = nil
+            phase = .welcome
+            return
+        }
         processingTask?.cancel()
         speechTranscriber.cancel()
         phase = .setup
@@ -714,6 +877,13 @@ final class AppModel: ObservableObject {
         if let securityScopedURL { securityScopedURL.stopAccessingSecurityScopedResource() }
         securityScopedURL = nil
         audioURL = nil
+        videoURL = nil
+        videoInfo = nil
+        videoPreviewPlayer = nil
+        exportEditableTimelines = false
+        exportFinishedVideo = false
+        if let videoAudioFolder { try? FileManager.default.removeItem(at: videoAudioFolder) }
+        videoAudioFolder = nil
         fileName = ""
         duration = 0
         phase = .welcome
@@ -732,6 +902,8 @@ final class AppModel: ObservableObject {
         exportAudio = false
         exportOriginal = false
         processingError = nil
+        processingLabel = "Preparing your audio"
+        processingTip = "A little room tone helps noise reduction sound more natural."
         pauseDecisions = []
         usesAcousticPauseDecisions = false
         isDemoTranscript = true
@@ -886,6 +1058,30 @@ final class AppModel: ObservableObject {
         pauseDecisions[index].isCompacted = !pauseDecisions[index].isProtected
     }
 
+    /// Rebuilds the non-destructive edit plan immediately when the transcript
+    /// editor's pause control moves. If the new plan cuts through the paused or
+    /// playing position, advance both previews to the next retained frame.
+    func setMaximumPause(_ value: Double) {
+        let clamped = min(max(value, 0.2), 2.0)
+        guard abs(clamped - pauseDuration) > 0.000_1 else { return }
+        pauseDuration = clamped
+
+        guard !playbackUsesEditedTimeline else { return }
+        let ranges = currentKeptRanges
+        guard !ranges.isEmpty else {
+            stopPlayback()
+            return
+        }
+
+        let sourceTime = player?.currentTime ?? currentTime
+        let playable = AudioEditPlanner.playableTime(for: sourceTime, keptRanges: ranges)
+            ?? ranges.last?.end
+            ?? 0
+        player?.currentTime = playable
+        currentTime = playable
+        seekVideoPreview(to: playable)
+    }
+
     func selectEditPreview(_ mode: EditPreviewMode) {
         guard mode != editPreviewMode else { return }
         let destination: URL?
@@ -901,6 +1097,7 @@ final class AppModel: ObservableObject {
         loadPlayer(url: destination, usesEditedTimeline: false)
         player?.currentTime = min(sourceTime, player?.duration ?? sourceTime)
         currentTime = player?.currentTime ?? sourceTime
+        seekVideoPreview(to: currentTime)
         editPreviewMode = mode
         if shouldResume { startPlayback() }
     }
@@ -914,11 +1111,25 @@ final class AppModel: ObservableObject {
             let requested = min(max(time, 0), player?.duration ?? estimatedEditedDuration)
             currentTime = requested
             player?.currentTime = requested
+            seekVideoPreview(to: sourceVideoTime(forEditedTime: requested))
             return
         }
         let requested = min(max(time, 0), duration)
         currentTime = AudioEditPlanner.playableTime(for: requested, keptRanges: currentKeptRanges) ?? duration
         player?.currentTime = currentTime
+        seekVideoPreview(to: currentTime)
+    }
+
+    /// Seeks using the compacted timeline coordinate system on every screen.
+    /// The transcript player still reads the untouched source, so map its time
+    /// back through the edit list before moving the underlying player.
+    func seekOnTimeline(to editedTime: TimeInterval) {
+        let requested = min(max(editedTime, 0), estimatedEditedDuration)
+        if playbackUsesEditedTimeline {
+            seek(to: requested)
+        } else {
+            seek(to: AudioEditPlanner.sourceTime(forEditedTime: requested, keptRanges: currentKeptRanges))
+        }
     }
 
     func startPlayback() {
@@ -930,7 +1141,9 @@ final class AppModel: ObservableObject {
         if player.currentTime >= player.duration { player.currentTime = 0 }
         if playbackUsesEditedTimeline {
             currentTime = player.currentTime
+            seekVideoPreview(to: sourceVideoTime(forEditedTime: currentTime))
             player.play()
+            videoPreviewPlayer?.play()
             isPlaying = true
             startPlaybackClock()
             return
@@ -941,19 +1154,24 @@ final class AppModel: ObservableObject {
         }
         player.currentTime = playable
         currentTime = playable
+        seekVideoPreview(to: playable)
         player.play()
+        videoPreviewPlayer?.play()
         isPlaying = true
         startPlaybackClock()
     }
 
     func pausePlayback() {
         player?.pause()
+        videoPreviewPlayer?.pause()
         isPlaying = false
         playbackTask?.cancel()
     }
 
     func stopPlayback() {
         player?.stop()
+        videoPreviewPlayer?.pause()
+        seekVideoPreview(to: 0)
         playbackTask?.cancel()
         isPlaying = false
         currentTime = 0
@@ -968,7 +1186,9 @@ final class AppModel: ObservableObject {
                     var sourceTime = player.currentTime
                     if playbackUsesEditedTimeline {
                         currentTime = sourceTime
+                        synchronizeVideoPreview(to: sourceVideoTime(forEditedTime: sourceTime))
                         if !player.isPlaying {
+                            videoPreviewPlayer?.pause()
                             isPlaying = false
                             break
                         }
@@ -979,12 +1199,15 @@ final class AppModel: ObservableObject {
                            playable > sourceTime + 0.002 {
                             player.currentTime = playable
                             sourceTime = playable
+                            seekVideoPreview(to: playable)
                         } else if playableTimeHasEnded(sourceTime, keptRanges: ranges) {
                             player.stop()
+                            videoPreviewPlayer?.pause()
                             isPlaying = false
                             break
                         }
                         currentTime = sourceTime
+                        synchronizeVideoPreview(to: sourceTime)
                         if !player.isPlaying {
                             isPlaying = false
                             break
@@ -1009,6 +1232,27 @@ final class AppModel: ObservableObject {
                 }
             }
         }
+    }
+
+    private func seekVideoPreview(to seconds: TimeInterval) {
+        guard let videoPreviewPlayer else { return }
+        videoPreviewPlayer.seek(
+            to: CMTime(seconds: max(0, seconds), preferredTimescale: 600),
+            toleranceBefore: .zero,
+            toleranceAfter: .zero
+        )
+    }
+
+    private func synchronizeVideoPreview(to seconds: TimeInterval) {
+        guard let videoPreviewPlayer else { return }
+        let videoTime = videoPreviewPlayer.currentTime().seconds
+        if !videoTime.isFinite || abs(videoTime - seconds) > 0.08 {
+            seekVideoPreview(to: seconds)
+        }
+    }
+
+    private func sourceVideoTime(forEditedTime editedTime: TimeInterval) -> TimeInterval {
+        AudioEditPlanner.sourceTime(forEditedTime: editedTime, keptRanges: currentKeptRanges)
     }
 
     private func playableTimeHasEnded(
@@ -1083,6 +1327,11 @@ final class AppModel: ObservableObject {
         markPolishChangesPending()
     }
 
+    func disableNoiseReduction() {
+        guard polishSelections.remove(.noise) != nil else { return }
+        markPolishChangesPending()
+    }
+
     func setPolishEnabled(_ enabled: Bool) {
         usePolish = enabled
         markPolishChangesPending()
@@ -1124,11 +1373,18 @@ final class AppModel: ObservableObject {
     }
 
     func selectPolishPreview(_ mode: PolishPreviewMode) {
+        let editedTime = playbackUsesEditedTimeline ? (player?.currentTime ?? currentTime) : 0
+        let shouldResume = isPlaying
         polishPreviewMode = mode
         pausePlayback()
         let url = mode == .before ? dryPreviewURL : polishedPreviewURL
         guard let url else { return }
         loadPlayer(url: url, usesEditedTimeline: true)
+        let restoredTime = min(editedTime, player?.duration ?? editedTime)
+        player?.currentTime = restoredTime
+        currentTime = restoredTime
+        seekVideoPreview(to: sourceVideoTime(forEditedTime: restoredTime))
+        if shouldResume { startPlayback() }
     }
 
     private func currentRenderOptions() -> AudioRenderOptions {
@@ -1345,11 +1601,13 @@ final class AppModel: ObservableObject {
         panel.allowsMultipleSelection = false
         guard panel.runModal() == .OK, let folder = panel.url else { return }
 
-        let base = fileName.isEmpty ? "Poet Audio" : URL(fileURLWithPath: fileName).deletingPathExtension().lastPathComponent
+        let base = fileName.isEmpty ? "Poeditcal" : URL(fileURLWithPath: fileName).deletingPathExtension().lastPathComponent
         let request = ExportPackageRequest(
             folder: folder,
             baseName: base,
             sourceURL: audioURL,
+            sourceVideoURL: videoURL,
+            videoInfo: videoInfo,
             words: words,
             pauseDecisions: usesAcousticPauseDecisions ? pauseDecisions : nil,
             duration: duration,
@@ -1358,7 +1616,9 @@ final class AppModel: ObservableObject {
             includeOriginal: exportOriginal,
             includeTXT: exportTXT,
             includeSRT: exportSRT,
-            includeVTT: exportVTT
+            includeVTT: exportVTT,
+            includeEditableTimelines: exportEditableTimelines,
+            includeFinishedVideo: exportFinishedVideo
         )
 
         isExporting = true

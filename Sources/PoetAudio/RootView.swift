@@ -113,13 +113,12 @@ private struct AppMark: View {
     var body: some View {
         ZStack {
             Circle().fill(PoetTheme.sageDark)
-            Image(systemName: "waveform")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(PoetTheme.sage)
+            PoeditcalMark()
+                .frame(width: 10, height: 19)
         }
         .frame(width: 34, height: 34)
         .shadow(color: .black.opacity(0.22), radius: 12, y: 5)
-        .accessibilityLabel("Poet Audio")
+        .accessibilityLabel(PoeditcalBrand.name)
     }
 }
 

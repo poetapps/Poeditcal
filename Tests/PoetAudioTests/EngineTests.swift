@@ -75,6 +75,52 @@ final class EngineTests: XCTestCase {
         XCTAssertEqual(try PoetProjectStore.load(from: package).snapshot.projectName, "Second draft")
     }
 
+    func testPoetProjectRoundTripKeepsSourceVideoAndTimelineSettings() throws {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PoetVideoProjectTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let sourceAudio = folder.appendingPathComponent("source.m4a")
+        let sourceVideo = folder.appendingPathComponent("source.mov")
+        try Data("audio".utf8).write(to: sourceAudio)
+        try Data("video".utf8).write(to: sourceVideo)
+        let snapshot = PoetProjectSnapshot(
+            projectName: "Talking head",
+            sourceAudioFile: "Source Audio.m4a",
+            sourceVideoFile: "Source Video.mov",
+            videoFrameRate: 29.97,
+            videoWidth: 1920,
+            videoHeight: 1080,
+            sourceDisplayName: "source.mov",
+            phase: .edit,
+            editingMode: .autopilot,
+            autoEditConfiguration: AutoEditConfiguration(),
+            pacing: .natural,
+            duration: 12,
+            words: [word("Hello", 1, 1.4)],
+            polishSelections: [],
+            usePolish: true,
+            loudnessPreset: .video,
+            exportAudio: false,
+            exportTXT: false,
+            exportSRT: false,
+            exportVTT: false,
+            exportEditableTimelines: true,
+            exportFinishedVideo: false
+        )
+
+        let package = try PoetProjectStore.save(
+            snapshot: snapshot,
+            sourceAudioURL: sourceAudio,
+            sourceVideoURL: sourceVideo,
+            to: folder.appendingPathComponent("Talking head.poe")
+        )
+        let loaded = try PoetProjectStore.load(from: package)
+        XCTAssertEqual(loaded.snapshot, snapshot)
+        XCTAssertEqual(loaded.videoURL?.lastPathComponent, "Source Video.mov")
+        XCTAssertEqual(try Data(contentsOf: XCTUnwrap(loaded.videoURL)), Data("video".utf8))
+    }
+
     func testLaunchArgumentsIgnoreNonAudioValuesLikeYES() {
         XCTAssertNil(PoetAppDelegate.launchAudioURL(
             arguments: ["PoetAudio", "YES"],
@@ -86,6 +132,173 @@ final class EngineTests: XCTestCase {
             fileExists: { $0 == "/tmp/take.m4a" }
         )
         XCTAssertEqual(audio?.path, "/tmp/take.m4a")
+    }
+
+    func testEditableTimelineUsesFullLengthSourcesAndReversibleClipRanges() throws {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PoetTimelineTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let video = folder.appendingPathComponent("Camera Take.mov")
+        let polished = folder.appendingPathComponent("Camera Take-polished-full.wav")
+        try Data().write(to: video)
+        try Data().write(to: polished)
+        let request = EditableTimelineRequest(
+            name: "Camera Take",
+            videoURL: video,
+            polishedAudioURL: polished,
+            originalAudioURL: nil,
+            keptRanges: [
+                AudioTimeRange(start: 0.5, end: 2.0),
+                AudioTimeRange(start: 4.0, end: 7.25)
+            ],
+            sourceDuration: 10,
+            frameRate: 30,
+            width: 1920,
+            height: 1080
+        )
+
+        try EditableTimelineRenderer.render(request, to: folder)
+
+        let xml = try String(contentsOf: folder.appendingPathComponent("Camera Take-Premiere.xml"), encoding: .utf8)
+        XCTAssertTrue(xml.contains("<duration>300</duration>"), "Media must remain full-length in the timeline project.")
+        XCTAssertTrue(xml.contains("<in>15</in><out>60</out>"))
+        XCTAssertTrue(xml.contains("<in>120</in><out>218</out>"))
+        XCTAssertTrue(xml.contains("Camera%20Take-polished-full.wav"))
+
+        let otioData = try Data(contentsOf: folder.appendingPathComponent("Camera Take-Resolve.otio"))
+        let otio = try XCTUnwrap(JSONSerialization.jsonObject(with: otioData) as? [String: Any])
+        let tracks = try XCTUnwrap(otio["tracks"] as? [String: Any])
+        let children = try XCTUnwrap(tracks["children"] as? [[String: Any]])
+        XCTAssertEqual(children.count, 3)
+        let polishedTrack = children[2]
+        let polishedClips = try XCTUnwrap(polishedTrack["children"] as? [[String: Any]])
+        XCTAssertEqual(polishedClips.count, 2)
+        XCTAssertNil(polishedClips[0]["media_reference"], "Clip.2 must not use the removed singular media_reference field.")
+        XCTAssertEqual(polishedClips[0]["active_media_reference_key"] as? String, "DEFAULT_MEDIA")
+        let references = try XCTUnwrap(polishedClips[0]["media_references"] as? [String: Any])
+        let reference = try XCTUnwrap(references["DEFAULT_MEDIA"] as? [String: Any])
+        let availableRange = try XCTUnwrap(reference["available_range"] as? [String: Any])
+        let availableDuration = try XCTUnwrap(availableRange["duration"] as? [String: Any])
+        XCTAssertEqual(availableDuration["value"] as? Double, 300)
+    }
+
+    func testEditedTimelineMapsBackToSourceVideoAcrossCuts() {
+        let ranges = [
+            AudioTimeRange(start: 1, end: 3),
+            AudioTimeRange(start: 6, end: 9)
+        ]
+
+        XCTAssertEqual(AudioEditPlanner.sourceTime(forEditedTime: 0, keptRanges: ranges), 1, accuracy: 0.001)
+        XCTAssertEqual(AudioEditPlanner.sourceTime(forEditedTime: 1.5, keptRanges: ranges), 2.5, accuracy: 0.001)
+        XCTAssertEqual(AudioEditPlanner.sourceTime(forEditedTime: 2.1, keptRanges: ranges), 6.1, accuracy: 0.001)
+        XCTAssertEqual(AudioEditPlanner.sourceTime(forEditedTime: 5, keptRanges: ranges), 9, accuracy: 0.001)
+    }
+
+    func testClipTimelineSnapsNearCutsWithoutDraggingDistantTimes() {
+        let ranges = [
+            AudioTimeRange(start: 1, end: 3),
+            AudioTimeRange(start: 6, end: 9)
+        ]
+        let boundaries = ClipTimelineMath.boundaries(for: ranges)
+        XCTAssertEqual(boundaries, [0, 2, 5])
+
+        let snapped = ClipTimelineMath.snappedTime(
+            2.04,
+            duration: 5,
+            boundaries: boundaries,
+            trackWidth: 500
+        )
+        XCTAssertEqual(snapped.time, 2, accuracy: 0.001)
+        XCTAssertEqual(snapped.boundary, 2)
+
+        let free = ClipTimelineMath.snappedTime(
+            2.5,
+            duration: 5,
+            boundaries: boundaries,
+            trackWidth: 500
+        )
+        XCTAssertEqual(free.time, 2.5, accuracy: 0.001)
+        XCTAssertNil(free.boundary)
+    }
+
+    func testTalkingHeadVideoInspectionAndFullLengthAudioExtraction() async throws {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PoetVideoTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let video = folder.appendingPathComponent("talking-head.mov")
+        try await makeTalkingHeadFixture(at: video, duration: 1)
+
+        XCTAssertEqual(SourceMediaInspector.kind(for: video), .video)
+        let info = try await SourceMediaInspector.inspectVideo(at: video)
+        XCTAssertEqual(info.duration, 1, accuracy: 0.08)
+        XCTAssertEqual(info.frameRate, 30, accuracy: 0.1)
+        XCTAssertEqual(info.width, 64)
+        XCTAssertEqual(info.height, 64)
+
+        let extracted = folder.appendingPathComponent("full-source.m4a")
+        try await VideoAudioExtractor.extractFullLengthAudio(from: video, to: extracted)
+        let audio = try AVAudioFile(forReading: extracted)
+        XCTAssertEqual(Double(audio.length) / audio.processingFormat.sampleRate, 1, accuracy: 0.08)
+
+        let finished = folder.appendingPathComponent("finished.mov")
+        try await EditedVideoRenderer.render(
+            sourceVideoURL: video,
+            polishedAudioURL: extracted,
+            destinationURL: finished,
+            keptRanges: [
+                AudioTimeRange(start: 0, end: 0.3),
+                AudioTimeRange(start: 0.6, end: 1.0)
+            ]
+        )
+        let finishedAsset = AVURLAsset(url: finished)
+        let finishedDuration = try await finishedAsset.load(.duration).seconds
+        let finishedVideoTracks = try await finishedAsset.loadTracks(withMediaType: .video)
+        let finishedAudioTracks = try await finishedAsset.loadTracks(withMediaType: .audio)
+        XCTAssertEqual(finishedDuration, 0.7, accuracy: 0.08)
+        XCTAssertEqual(finishedVideoTracks.count, 1)
+        XCTAssertEqual(finishedAudioTracks.count, 1)
+
+        let words = [
+            word("Keep", 0, 0.3),
+            word("remove", 0.3, 0.6, removed: true),
+            word("this", 0.6, 1.0)
+        ]
+        let package = try await ExportPackageRenderer.render(
+            ExportPackageRequest(
+                folder: folder,
+                baseName: "talking-head",
+                sourceURL: extracted,
+                sourceVideoURL: video,
+                videoInfo: info,
+                words: words,
+                duration: 1,
+                renderOptions: AudioRenderOptions(
+                    pacing: .untouched,
+                    reduceNoise: false,
+                    voiceEQ: false,
+                    deEss: false,
+                    compression: false,
+                    forceMono: false,
+                    breathControl: false,
+                    normalizeLoudness: false,
+                    loudnessPreset: .video
+                ),
+                includeAudio: false,
+                includeTXT: false,
+                includeSRT: false,
+                includeVTT: false,
+                includeEditableTimelines: true,
+                includeFinishedVideo: true
+            )
+        )
+        XCTAssertTrue(FileManager.default.fileExists(atPath: package.appendingPathComponent("talking-head-source.mov").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: package.appendingPathComponent("talking-head-polished-full.wav").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: package.appendingPathComponent("talking-head-Premiere.xml").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: package.appendingPathComponent("talking-head-Resolve.otio").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: package.appendingPathComponent("talking-head-finished.mov").path))
+        _ = try AVAudioFile(forReading: package.appendingPathComponent("talking-head-polished-full.wav"))
     }
 
     func testDenoiseModelDownloadConfigurationIsPinnedAndVerifiable() throws {
@@ -101,6 +314,47 @@ final class EngineTests: XCTestCase {
             try DenoiseModelStore.sha256Digest(of: fixture),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         )
+    }
+
+    @MainActor
+    func testDenoiseModelCanBeUninstalled() throws {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PoetDenoiseUninstall-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let modelURL = folder.appendingPathComponent(DenoiseModelStore.modelFileName)
+        try Data("abc".utf8).write(to: modelURL)
+        let store = DenoiseModelStore(
+            installationDirectoryURL: folder,
+            requiredSHA256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        )
+
+        XCTAssertTrue(store.isInstalled)
+        XCTAssertTrue(store.uninstall())
+        XCTAssertFalse(store.isInstalled)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: modelURL.path))
+    }
+
+    @MainActor
+    func testSmartEditModelCanBeUninstalledWithoutTouchingOtherChoice() throws {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PoetSmartEditUninstall-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        for choice in SmartEditModelChoice.allCases {
+            let choiceFolder = folder.appendingPathComponent(choice.rawValue, isDirectory: true)
+            try FileManager.default.createDirectory(at: choiceFolder, withIntermediateDirectories: true)
+            try Data(choice.repoID.utf8).write(to: choiceFolder.appendingPathComponent(".installed"))
+            try Data("cached weights".utf8).write(to: choiceFolder.appendingPathComponent("weights.bin"))
+        }
+        let store = SmartEditModelStore(modelsDirectoryURL: folder)
+
+        XCTAssertTrue(store.isInstalled(.fast))
+        XCTAssertTrue(store.isInstalled(.reliable))
+        XCTAssertTrue(store.uninstall(.fast))
+        XCTAssertFalse(store.isInstalled(.fast))
+        XCTAssertTrue(store.isInstalled(.reliable))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: folder.appendingPathComponent("fast").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: folder.appendingPathComponent("reliable").path))
     }
 
     func testAutoEditFindsEarlierRepeatedTakeAndFiller() {
@@ -888,6 +1142,69 @@ final class EngineTests: XCTestCase {
             buffer.floatChannelData!.pointee.update(from: source.baseAddress!, count: samples.count)
         }
         try file.write(from: buffer)
+    }
+
+    private func makeTalkingHeadFixture(at destination: URL, duration: TimeInterval) async throws {
+        let folder = destination.deletingLastPathComponent()
+        let videoOnly = folder.appendingPathComponent("video-only.mov")
+        let audioOnly = folder.appendingPathComponent("audio-only.wav")
+        try makeTone(at: audioOnly, duration: duration)
+
+        let writer = try AVAssetWriter(outputURL: videoOnly, fileType: .mov)
+        let input = AVAssetWriterInput(
+            mediaType: .video,
+            outputSettings: [
+                AVVideoCodecKey: AVVideoCodecType.h264,
+                AVVideoWidthKey: 64,
+                AVVideoHeightKey: 64
+            ]
+        )
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(
+            assetWriterInput: input,
+            sourcePixelBufferAttributes: [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                kCVPixelBufferWidthKey as String: 64,
+                kCVPixelBufferHeightKey as String: 64
+            ]
+        )
+        XCTAssertTrue(writer.canAdd(input))
+        writer.add(input)
+        XCTAssertTrue(writer.startWriting())
+        writer.startSession(atSourceTime: .zero)
+        for frame in 0..<Int(duration * 30) {
+            while !input.isReadyForMoreMediaData { try await Task.sleep(for: .milliseconds(2)) }
+            var pixel: CVPixelBuffer?
+            CVPixelBufferCreate(
+                kCFAllocatorDefault, 64, 64, kCVPixelFormatType_32BGRA,
+                [kCVPixelBufferCGImageCompatibilityKey: true] as CFDictionary,
+                &pixel
+            )
+            let buffer = try XCTUnwrap(pixel)
+            CVPixelBufferLockBaseAddress(buffer, [])
+            if let base = CVPixelBufferGetBaseAddress(buffer) {
+                memset(base, frame % 2 == 0 ? 32 : 48, CVPixelBufferGetDataSize(buffer))
+            }
+            CVPixelBufferUnlockBaseAddress(buffer, [])
+            XCTAssertTrue(adaptor.append(buffer, withPresentationTime: CMTime(value: CMTimeValue(frame), timescale: 30)))
+        }
+        input.markAsFinished()
+        await writer.finishWriting()
+        if writer.status != .completed { throw writer.error ?? CocoaError(.fileWriteUnknown) }
+
+        let videoAsset = AVURLAsset(url: videoOnly)
+        let audioAsset = AVURLAsset(url: audioOnly)
+        let composition = AVMutableComposition()
+        let videoTracks = try await videoAsset.loadTracks(withMediaType: .video)
+        let audioTracks = try await audioAsset.loadTracks(withMediaType: .audio)
+        let videoTrack = try XCTUnwrap(videoTracks.first)
+        let audioTrack = try XCTUnwrap(audioTracks.first)
+        let range = CMTimeRange(start: .zero, duration: CMTime(seconds: duration, preferredTimescale: 600))
+        let compositionVideo = try XCTUnwrap(composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid))
+        let compositionAudio = try XCTUnwrap(composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid))
+        try compositionVideo.insertTimeRange(range, of: videoTrack, at: .zero)
+        try compositionAudio.insertTimeRange(range, of: audioTrack, at: .zero)
+        let exporter = try XCTUnwrap(AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetHighestQuality))
+        try await exporter.export(to: destination, as: .mov)
     }
 
     private func makeBreathFixture(at url: URL) throws {

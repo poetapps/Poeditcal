@@ -4,6 +4,8 @@ struct ExportPackageRequest: Sendable {
     let folder: URL
     let baseName: String
     let sourceURL: URL?
+    let sourceVideoURL: URL?
+    let videoInfo: VideoMediaInfo?
     let words: [TranscriptWord]
     let pauseDecisions: [PauseEditDecision]?
     let duration: TimeInterval
@@ -13,11 +15,15 @@ struct ExportPackageRequest: Sendable {
     let includeTXT: Bool
     let includeSRT: Bool
     let includeVTT: Bool
+    let includeEditableTimelines: Bool
+    let includeFinishedVideo: Bool
 
     init(
         folder: URL,
         baseName: String,
         sourceURL: URL?,
+        sourceVideoURL: URL? = nil,
+        videoInfo: VideoMediaInfo? = nil,
         words: [TranscriptWord],
         pauseDecisions: [PauseEditDecision]? = nil,
         duration: TimeInterval,
@@ -26,11 +32,15 @@ struct ExportPackageRequest: Sendable {
         includeOriginal: Bool = false,
         includeTXT: Bool,
         includeSRT: Bool,
-        includeVTT: Bool
+        includeVTT: Bool,
+        includeEditableTimelines: Bool = false,
+        includeFinishedVideo: Bool = false
     ) {
         self.folder = folder
         self.baseName = baseName
         self.sourceURL = sourceURL
+        self.sourceVideoURL = sourceVideoURL
+        self.videoInfo = videoInfo
         self.words = words
         self.pauseDecisions = pauseDecisions
         self.duration = duration
@@ -40,6 +50,8 @@ struct ExportPackageRequest: Sendable {
         self.includeTXT = includeTXT
         self.includeSRT = includeSRT
         self.includeVTT = includeVTT
+        self.includeEditableTimelines = includeEditableTimelines
+        self.includeFinishedVideo = includeFinishedVideo
     }
 }
 
@@ -60,7 +72,7 @@ enum ExportPackageRenderer {
         let keptWords = request.words.filter { !$0.isRemoved }
 
         if request.includeOriginal {
-            guard let sourceURL = request.sourceURL else {
+            guard let sourceURL = request.sourceVideoURL ?? request.sourceURL else {
                 throw CocoaError(.fileNoSuchFile, userInfo: [
                     NSLocalizedDescriptionKey: "Choose a real audio file before exporting the original recording."
                 ])
@@ -113,6 +125,73 @@ enum ExportPackageRenderer {
                 destinationURL: finishedURL,
                 options: request.renderOptions,
                 progress: progress
+            )
+        }
+        var fullLengthPolishedURL: URL?
+        if request.includeEditableTimelines || request.includeFinishedVideo {
+            guard let sourceAudioURL = request.sourceURL,
+                  let sourceVideoURL = request.sourceVideoURL,
+                  let videoInfo = request.videoInfo else {
+                throw CocoaError(.fileNoSuchFile, userInfo: [
+                    NSLocalizedDescriptionKey: "An editable timeline requires the original video and its full-length audio."
+                ])
+            }
+            // This is deliberately polished before any transcript cuts. Timeline
+            // clips use source in/out points against the complete WAV, so editors
+            // can extend either edge and recover audio that Poet initially hid.
+            let fullSourceFolder = FileManager.default.temporaryDirectory
+                .appendingPathComponent("PoetFullSource-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: fullSourceFolder, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: fullSourceFolder) }
+            let fullSourceWAV = fullSourceFolder.appendingPathComponent("full-source.wav")
+            try EditedAudioRenderer.render(
+                sourceURL: sourceAudioURL,
+                destinationURL: fullSourceWAV,
+                keptRanges: [AudioTimeRange(start: 0, end: request.duration)]
+            )
+            let polishedFullURL = exportFolder.appendingPathComponent("\(request.baseName)-polished-full.wav")
+            try await VoicePolisher.render(
+                sourceURL: fullSourceWAV,
+                destinationURL: polishedFullURL,
+                options: request.renderOptions,
+                progress: progress
+            )
+            fullLengthPolishedURL = polishedFullURL
+            if request.includeEditableTimelines {
+                let videoExtension = sourceVideoURL.pathExtension.isEmpty ? "mov" : sourceVideoURL.pathExtension.lowercased()
+                let timelineVideoURL = exportFolder.appendingPathComponent("\(request.baseName)-source.\(videoExtension)")
+                if sourceVideoURL.standardizedFileURL != timelineVideoURL.standardizedFileURL {
+                    try? FileManager.default.removeItem(at: timelineVideoURL)
+                    try FileManager.default.copyItem(at: sourceVideoURL, to: timelineVideoURL)
+                }
+                try EditableTimelineRenderer.render(
+                    EditableTimelineRequest(
+                        name: request.baseName,
+                        videoURL: timelineVideoURL,
+                        polishedAudioURL: polishedFullURL,
+                        originalAudioURL: nil,
+                        keptRanges: ranges,
+                        sourceDuration: request.duration,
+                        frameRate: videoInfo.frameRate,
+                        width: videoInfo.width,
+                        height: videoInfo.height
+                    ),
+                    to: exportFolder
+                )
+            }
+        }
+        if request.includeFinishedVideo {
+            guard let sourceVideoURL = request.sourceVideoURL,
+                  let fullLengthPolishedURL else {
+                throw CocoaError(.fileNoSuchFile, userInfo: [
+                    NSLocalizedDescriptionKey: "A finished video requires the source video and polished audio."
+                ])
+            }
+            try await EditedVideoRenderer.render(
+                sourceVideoURL: sourceVideoURL,
+                polishedAudioURL: fullLengthPolishedURL,
+                destinationURL: exportFolder.appendingPathComponent("\(request.baseName)-finished.mov"),
+                keptRanges: ranges
             )
         }
         return exportFolder

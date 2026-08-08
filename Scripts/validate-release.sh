@@ -34,4 +34,4 @@ if [[ ! -f "$PROJECT_ROOT/ReleaseNotes/$VERSION.md" ]]; then
     exit 66
 fi
 
-echo "Validated Poet Audio $VERSION (build $BUILD_NUMBER)"
+echo "Validated Poeditcal $VERSION (build $BUILD_NUMBER)"

@@ -215,6 +215,23 @@ enum AudioEditPlanner {
         return accumulated
     }
 
+    /// Maps a compacted preview or export timestamp back to the corresponding
+    /// position in the untouched source media. This keeps a source-video preview
+    /// synchronized while edited audio skips across removed ranges.
+    static func sourceTime(forEditedTime editedTime: TimeInterval, keptRanges: [AudioTimeRange]) -> TimeInterval {
+        guard let first = keptRanges.first else { return 0 }
+        let requested = max(0, editedTime)
+        var editedCursor: TimeInterval = 0
+        for range in keptRanges {
+            let rangeDuration = max(0, range.end - range.start)
+            if requested <= editedCursor + rangeDuration {
+                return min(range.end, range.start + max(0, requested - editedCursor))
+            }
+            editedCursor += rangeDuration
+        }
+        return keptRanges.last?.end ?? first.start
+    }
+
     static func playableTime(for requestedTime: TimeInterval, keptRanges: [AudioTimeRange]) -> TimeInterval? {
         for range in keptRanges {
             if requestedTime < range.start { return range.start }

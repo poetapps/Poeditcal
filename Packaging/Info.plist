@@ -11,9 +11,9 @@
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>Poet Audio</string>
+    <string>Poeditcal</string>
     <key>CFBundleDisplayName</key>
-    <string>Poet Audio</string>
+    <string>Poeditcal</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
@@ -21,7 +21,7 @@
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>SUFeedURL</key>
-    <string>https://poetapps.github.io/PoetAudio/appcast.xml</string>
+    <string>https://poetapps.github.io/Poeditcal/appcast.xml</string>
     <key>SUPublicEDKey</key>
     <string>bJNbPJDy1nTtJKfHo5sAPrXDiW4ij+6kfeYx/ntuPFw=</string>
     <key>SUEnableAutomaticChecks</key>
@@ -32,7 +32,7 @@
     <array>
         <dict>
             <key>CFBundleTypeName</key>
-            <string>Poet Audio Project</string>
+            <string>Poeditcal Project</string>
             <key>CFBundleTypeRole</key>
             <string>Editor</string>
             <key>LSHandlerRank</key>
@@ -61,7 +61,7 @@
             <key>UTTypeIdentifier</key>
             <string>com.poetaudio.project</string>
             <key>UTTypeDescription</key>
-            <string>Poet Audio Project</string>
+            <string>Poeditcal Project</string>
             <key>UTTypeConformsTo</key>
             <array>
                 <string>com.apple.package</string>
@@ -77,7 +77,7 @@
         </dict>
     </array>
     <key>NSMicrophoneUsageDescription</key>
-    <string>Poet Audio uses the microphone when you choose to record a new take.</string>
+    <string>Poeditcal uses the microphone when you choose to record a new take.</string>
     <key>LSMinimumSystemVersion</key>
     <string>15.0</string>
     <key>NSHighResolutionCapable</key>

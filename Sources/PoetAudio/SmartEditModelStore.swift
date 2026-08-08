@@ -107,13 +107,22 @@ final class SmartEditModelStore: ObservableObject {
 
     private static let selectionKey = "smartEditModelChoiceV1"
     private static let logger = Logger(subsystem: "com.poetaudio.mac", category: "SmartEdit")
+    private let installationDirectoryURL: URL
     private var loadedChoice: SmartEditModelChoice?
     private var loadedContainer: ModelContainer?
 
-    private init() {
+    init(modelsDirectoryURL: URL = SmartEditModelStore.defaultModelsDirectoryURL) {
+        installationDirectoryURL = modelsDirectoryURL
         selectedChoice = UserDefaults.standard.string(forKey: Self.selectionKey)
             .flatMap(SmartEditModelChoice.init(rawValue:)) ?? .fast
-        installedChoices = Set(SmartEditModelChoice.allCases.filter(Self.isInstalled))
+        installedChoices = Set(SmartEditModelChoice.allCases.filter { choice in
+            FileManager.default.fileExists(
+                atPath: modelsDirectoryURL
+                    .appendingPathComponent(choice.rawValue, isDirectory: true)
+                    .appendingPathComponent(".installed")
+                    .path
+            )
+        })
     }
 
     func isInstalled(_ choice: SmartEditModelChoice) -> Bool {
@@ -134,10 +143,10 @@ final class SmartEditModelStore: ObservableObject {
         do {
             _ = try await load(choice, allowsDownload: true)
             try FileManager.default.createDirectory(
-                at: Self.modelDirectory(for: choice),
+                at: modelDirectory(for: choice),
                 withIntermediateDirectories: true
             )
-            try Data(choice.repoID.utf8).write(to: Self.markerURL(for: choice), options: .atomic)
+            try Data(choice.repoID.utf8).write(to: markerURL(for: choice), options: .atomic)
             installedChoices.insert(choice)
             downloadProgress = 1
         } catch is CancellationError {
@@ -146,6 +155,32 @@ final class SmartEditModelStore: ObservableObject {
             errorMessage = "Poet couldn’t install \(choice.modelName). \(error.localizedDescription)"
         }
         downloadingChoice = nil
+    }
+
+    @discardableResult
+    func uninstall(_ choice: SmartEditModelChoice) -> Bool {
+        guard downloadingChoice != choice else { return false }
+
+        do {
+            let directory = modelDirectory(for: choice)
+            if FileManager.default.fileExists(atPath: directory.path) {
+                try FileManager.default.removeItem(at: directory)
+            }
+            if loadedChoice == choice {
+                loadedChoice = nil
+                loadedContainer = nil
+            }
+            installedChoices.remove(choice)
+            if selectedChoice == choice,
+               let replacement = SmartEditModelChoice.allCases.first(where: installedChoices.contains) {
+                selectedChoice = replacement
+            }
+            errorMessage = nil
+            return true
+        } catch {
+            errorMessage = "Poet couldn’t remove \(choice.modelName). \(error.localizedDescription)"
+            return false
+        }
     }
 
     func contextualSuggestions(
@@ -187,11 +222,11 @@ final class SmartEditModelStore: ObservableObject {
         allowsDownload: Bool
     ) async throws -> ModelContainer {
         if loadedChoice == choice, let loadedContainer { return loadedContainer }
-        guard allowsDownload || Self.isInstalled(choice) else {
+        guard allowsDownload || modelIsInstalled(choice) else {
             throw SmartEditModelError.notInstalled
         }
 
-        let cache = HubCache(cacheDirectory: Self.modelDirectory(for: choice))
+        let cache = HubCache(cacheDirectory: modelDirectory(for: choice))
         let hub = HubClient(cache: cache)
         let container = try await LLMModelFactory.shared.loadContainer(
             from: #hubDownloader(hub),
@@ -220,7 +255,7 @@ final class SmartEditModelStore: ObservableObject {
             return "[\(globalIndex)] \(token.text) {\(String(format: "%.2f", token.startTime))s}"
         }.joined(separator: " ")
         let system = """
-        You are Poet Audio's conservative spoken-word editor. Identify only words the speaker clearly intended to replace or abandon: self-corrections, false starts, accidental adjacent repetitions, and genuine verbal fillers. Preserve meaning, style, emphasis, quotations, and intentional discourse phrases. "I mean" is not automatically a filler. If it introduces a correction, delete the abandoned earlier wording together with the correction cue and keep the corrected wording. If it begins or naturally belongs to the intended sentence, keep it. Return token IDs from the supplied transcript only. Never delete the final corrected take.
+        You are Poeditcal's conservative spoken-word editor. Identify only words the speaker clearly intended to replace or abandon: self-corrections, false starts, accidental adjacent repetitions, and genuine verbal fillers. Preserve meaning, style, emphasis, quotations, and intentional discourse phrases. "I mean" is not automatically a filler. If it introduces a correction, delete the abandoned earlier wording together with the correction cue and keep the corrected wording. If it begins or naturally belongs to the intended sentence, keep it. Return token IDs from the supplied transcript only. Never delete the final corrected take.
         """
         let preferences = """
         Enabled categories: fillers=\(configuration.removeFillers), retakes=\(configuration.detectRetakes), restarts=\(configuration.detectRestarts). Intensity=\(configuration.intensity.rawValue). If no clear edit is needed, return an empty deletions array.
@@ -383,21 +418,21 @@ final class SmartEditModelStore: ObservableObject {
         return ranges
     }
 
-    nonisolated private static var modelsDirectoryURL: URL {
+    nonisolated static var defaultModelsDirectoryURL: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent("Poet Audio", isDirectory: true)
             .appendingPathComponent("Smart Edit Models", isDirectory: true)
     }
 
-    nonisolated private static func modelDirectory(for choice: SmartEditModelChoice) -> URL {
-        modelsDirectoryURL.appendingPathComponent(choice.rawValue, isDirectory: true)
+    private func modelDirectory(for choice: SmartEditModelChoice) -> URL {
+        installationDirectoryURL.appendingPathComponent(choice.rawValue, isDirectory: true)
     }
 
-    nonisolated private static func markerURL(for choice: SmartEditModelChoice) -> URL {
+    private func markerURL(for choice: SmartEditModelChoice) -> URL {
         modelDirectory(for: choice).appendingPathComponent(".installed")
     }
 
-    nonisolated private static func isInstalled(_ choice: SmartEditModelChoice) -> Bool {
+    private func modelIsInstalled(_ choice: SmartEditModelChoice) -> Bool {
         FileManager.default.fileExists(atPath: markerURL(for: choice).path)
     }
 }

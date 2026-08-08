@@ -11,18 +11,12 @@ struct WelcomeView: View {
         ScrollView {
             VStack(spacing: 30) {
                 VStack(spacing: 18) {
-                    HStack(spacing: 10) {
-                        Image(systemName: "waveform")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(PoetTheme.sage)
-                        Text("Poet Audio")
-                            .font(PoetTheme.utility(15, weight: .semibold))
-                    }
+                    PoeditcalWordmark()
                     Text("Make the take feel finished.")
                         .font(PoetTheme.editorial(42, weight: .regular))
                         .multilineTextAlignment(.center)
                         .foregroundStyle(PoetTheme.cream)
-                    Text("Bring in a recording. Poet helps shape the edit, polish the voice, and keeps every decision reversible.")
+                    Text("Bring in a recording or talking-head video. Poeditcal helps shape the edit, polish the voice, and keeps every decision reversible.")
                         .font(PoetTheme.utility(13))
                         .foregroundStyle(PoetTheme.muted)
                         .multilineTextAlignment(.center)
@@ -40,14 +34,14 @@ struct WelcomeView: View {
                                     .foregroundStyle(PoetTheme.sage)
                             }
                             VStack(spacing: 5) {
-                                Text("Drop a recording here")
+                                Text("Drop a recording or video here")
                                     .font(PoetTheme.utility(17, weight: .semibold))
                                     .foregroundStyle(PoetTheme.cream)
                                 Text("or choose one from your Mac")
                                     .font(PoetTheme.utility(13))
                                     .foregroundStyle(PoetTheme.muted)
                             }
-                            Text("WAV · M4A · MP3 · AIFF · FLAC")
+                            Text("WAV · M4A · MP3 · AIFF · FLAC · MOV · MP4 · M4V")
                                 .font(PoetTheme.utility(10, weight: .bold))
                                 .tracking(1.1)
                                 .foregroundStyle(PoetTheme.faint)
@@ -60,13 +54,13 @@ struct WelcomeView: View {
                     .buttonStyle(.plain)
                     .dropDestination(for: URL.self) { urls, _ in
                         guard let url = urls.first else { return false }
-                        model.loadAudio(url)
+                        model.loadMedia(url)
                         return true
                     } isTargeted: { isDropTarget = $0 }
 
                     HStack(spacing: 12) {
                         Button { showingImporter = true } label: {
-                            Label("Choose a recording", systemImage: "folder")
+                            Label("Choose media", systemImage: "folder")
                         }
                         .buttonStyle(PrimaryButtonStyle())
 
@@ -92,8 +86,8 @@ struct WelcomeView: View {
             .padding(.top, 42)
             .padding(.bottom, 60)
         }
-        .fileImporter(isPresented: $showingImporter, allowedContentTypes: [.audio], allowsMultipleSelection: false) { result in
-            if case let .success(urls) = result, let url = urls.first { model.loadAudio(url) }
+        .fileImporter(isPresented: $showingImporter, allowedContentTypes: [.audio, .movie], allowsMultipleSelection: false) { result in
+            if case let .success(urls) = result, let url = urls.first { model.loadMedia(url) }
         }
         .sheet(isPresented: $showingRecorder) {
             RecordingView()
@@ -145,7 +139,7 @@ private struct RecordingView: View {
                 Text(time(model.recordingDuration))
                     .font(.system(size: 32, weight: .medium, design: .monospaced))
                     .foregroundStyle(PoetTheme.cream)
-                Text(model.isRecording ? "Speak naturally. Your recording stays on this Mac." : "Poet records a high-quality mono M4A file.")
+                Text(model.isRecording ? "Speak naturally. Your recording stays on this Mac." : "Poeditcal records a high-quality mono M4A file.")
                     .font(PoetTheme.utility(12))
                     .foregroundStyle(PoetTheme.muted)
             }

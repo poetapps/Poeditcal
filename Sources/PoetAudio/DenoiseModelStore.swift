@@ -16,7 +16,7 @@ final class DenoiseModelStore: ObservableObject {
     nonisolated static let downloadSize = 10_596_848
     nonisolated static let expectedSHA256 = "0b399f8a58dc4d70d8cd97541f5c39869406145193b957d00a03b66070944928"
     nonisolated static let remoteURL = URL(
-        string: "https://raw.githubusercontent.com/poetapps/PoetAudio/8e67a45bbd269bb530ff88a5c0fb69a7fd43db15/Resources/Models/dpdfnet2_48khz_hr.onnx"
+        string: "https://raw.githubusercontent.com/poetapps/Poeditcal/8e67a45bbd269bb530ff88a5c0fb69a7fd43db15/Resources/Models/dpdfnet2_48khz_hr.onnx"
     )!
 
     @Published private(set) var state: State
@@ -91,6 +91,26 @@ final class DenoiseModelStore: ObservableObject {
 
     func retry() async {
         await install()
+    }
+
+    @discardableResult
+    func uninstall() -> Bool {
+        guard !isDownloading else { return false }
+
+        do {
+            if FileManager.default.fileExists(atPath: modelURL.path) {
+                try FileManager.default.removeItem(at: modelURL)
+            }
+            let stagedURL = installationDirectoryURL.appendingPathComponent(".\(Self.modelFileName).download")
+            if FileManager.default.fileExists(atPath: stagedURL.path) {
+                try FileManager.default.removeItem(at: stagedURL)
+            }
+            state = .notInstalled
+            return true
+        } catch {
+            state = .failed("Poet couldn’t remove the noise-reduction model. \(error.localizedDescription)")
+            return false
+        }
     }
 
     func refresh() {

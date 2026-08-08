@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -ne 2 ]]; then
-    echo "Usage: $0 /path/to/Poet\ Audio.app /path/to/Poet-Audio-version.dmg" >&2
+    echo "Usage: $0 /path/to/Poeditcal.app /path/to/Poeditcal-version.dmg" >&2
     exit 64
 fi
 
@@ -26,11 +26,11 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -p "$(dirname "$DMG_PATH")"
-ditto "$APP_PATH" "$STAGING_DIR/Poet Audio.app"
+ditto "$APP_PATH" "$STAGING_DIR/Poeditcal.app"
 ln -s /Applications "$STAGING_DIR/Applications"
 
 hdiutil create \
-    -volname "Poet Audio" \
+    -volname "Poeditcal" \
     -srcfolder "$STAGING_DIR" \
     -format UDZO \
     -ov \

@@ -18,9 +18,9 @@ enum TranscriptionError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case let .modelUnavailable(details):
-            "Poet Audio couldn’t prepare its local Parakeet model. Check your connection for the first download, then try again.\n\n\(details)"
+            "Poeditcal couldn’t prepare its local Parakeet model. Check your connection for the first download, then try again.\n\n\(details)"
         case .unsupportedAudio:
-            "Poet Audio couldn’t prepare this recording for transcription."
+            "Poeditcal couldn’t prepare this recording for transcription."
         case .noSpeechFound:
             "No spoken words were found in this recording."
         }

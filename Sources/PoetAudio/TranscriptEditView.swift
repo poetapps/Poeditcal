@@ -1,3 +1,4 @@
+import AVKit
 import SwiftUI
 
 struct TranscriptEditView: View {
@@ -98,6 +99,16 @@ private struct TranscriptPanel: View {
         PoetCard(padding: 0) {
             ScrollViewReader { transcriptProxy in
                 VStack(spacing: 0) {
+                if let videoPlayer = model.videoPreviewPlayer {
+                    VideoPlayer(player: videoPlayer)
+                        .aspectRatio(
+                            model.videoInfo.map { CGFloat($0.width) / CGFloat(max(1, $0.height)) } ?? (16 / 9),
+                            contentMode: .fit
+                        )
+                        .frame(maxHeight: 280)
+                        .background(Color.black)
+                    Rectangle().fill(PoetTheme.divider).frame(height: 1)
+                }
                 HStack(spacing: 12) {
                     Text("Transcript").font(PoetTheme.editorial(22, weight: .regular))
                     Circle().fill(model.isDemoTranscript ? PoetTheme.amber : PoetTheme.sage).frame(width: 5, height: 5)
@@ -127,18 +138,16 @@ private struct TranscriptPanel: View {
 
                 Rectangle().fill(PoetTheme.divider).frame(height: 1)
 
-                if !model.pauseDecisions.isEmpty {
-                    PauseReviewStrip(highlightedPauseID: $highlightedPauseID) { pause in
-                        guard let pause else { return }
-                        let target = pause.beforeWordID ?? pause.afterWordID
-                        if let target {
-                            withAnimation(.easeInOut(duration: 0.25)) {
-                                transcriptProxy.scrollTo(target, anchor: .center)
-                            }
+                PauseControlsStrip(highlightedPauseID: $highlightedPauseID) { pause in
+                    guard let pause else { return }
+                    let target = pause.beforeWordID ?? pause.afterWordID
+                    if let target {
+                        withAnimation(.easeInOut(duration: 0.25)) {
+                            transcriptProxy.scrollTo(target, anchor: .center)
                         }
                     }
-                    Rectangle().fill(PoetTheme.divider).frame(height: 1)
                 }
+                Rectangle().fill(PoetTheme.divider).frame(height: 1)
 
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 24) {
@@ -430,7 +439,7 @@ private struct PlayerBar: View {
             }
             .buttonStyle(.plain)
 
-            Text(time(model.currentTime))
+            Text(time(model.timelineCurrentTime))
                 .font(.system(size: 10, weight: .medium, design: .monospaced))
                 .foregroundStyle(PoetTheme.muted)
 
@@ -447,10 +456,10 @@ private struct PlayerBar: View {
                 .help(model.firstPassStatus ?? "Compare the untouched source with the timing-aligned first pass")
             }
 
-            WaveformScrubber()
-                .frame(height: 38)
+            ClipTimelineView()
+                .frame(height: 54)
 
-            Text(time(model.duration))
+            Text(time(model.estimatedEditedDuration))
                 .font(.system(size: 10, weight: .medium, design: .monospaced))
                 .foregroundStyle(PoetTheme.muted)
         }
@@ -462,47 +471,90 @@ private struct PlayerBar: View {
     }
 }
 
-private struct PauseReviewStrip: View {
+private struct PauseControlsStrip: View {
     @EnvironmentObject private var model: AppModel
     @Binding var highlightedPauseID: UUID?
     let onHighlight: (PauseEditDecision?) -> Void
 
+    private var pauseDuration: Binding<Double> {
+        Binding(
+            get: { model.pauseDuration },
+            set: { model.setMaximumPause($0) }
+        )
+    }
+
+    private var visiblePauses: [PauseEditDecision] {
+        model.pauseDecisions.filter {
+            $0.isProtected || $0.originalDuration > model.pauseDuration + 0.002
+        }
+    }
+
     var body: some View {
         HStack(spacing: 12) {
-            Label("Confirmed pauses", systemImage: "waveform.badge.magnifyingglass")
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 6) {
+                    Label("Maximum pause", systemImage: "pause")
+                    Spacer(minLength: 8)
+                    Text(String(format: "%.1fs", model.pauseDuration))
+                        .foregroundStyle(PoetTheme.sage)
+                        .monospacedDigit()
+                        .contentTransition(.numericText())
+                }
                 .font(PoetTheme.utility(9, weight: .semibold))
-                .foregroundStyle(PoetTheme.muted)
-                .fixedSize()
 
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 7) {
-                    ForEach(model.pauseDecisions) { pause in
-                        Button { model.togglePauseProtection(pause) } label: {
-                            HStack(spacing: 6) {
-                                Image(systemName: pause.isProtected ? "lock.fill" : "arrow.right")
-                                Text(pause.isProtected
-                                     ? String(format: "Keep %.1fs", pause.originalDuration)
-                                     : String(format: "%.1fs → %.1fs", pause.originalDuration, min(pause.originalDuration, model.pauseDuration)))
+                Slider(value: pauseDuration, in: 0.2...2.0, step: 0.1)
+                    .tint(PoetTheme.sage)
+                    .accessibilityLabel("Maximum pause duration")
+                    .accessibilityValue(String(format: "%.1f seconds", model.pauseDuration))
+            }
+            .frame(width: 190)
+
+            Rectangle().fill(PoetTheme.divider).frame(width: 1, height: 32)
+
+            if visiblePauses.isEmpty {
+                Text(model.pauseDecisions.isEmpty
+                     ? "No silent pauses were confirmed"
+                     : "No confirmed pauses exceed this limit")
+                    .font(PoetTheme.utility(9, weight: .medium))
+                    .foregroundStyle(PoetTheme.faint)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                Label("Confirmed", systemImage: "waveform.badge.magnifyingglass")
+                    .font(PoetTheme.utility(9, weight: .semibold))
+                    .foregroundStyle(PoetTheme.muted)
+                    .fixedSize()
+
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 7) {
+                        ForEach(visiblePauses) { pause in
+                            Button { model.togglePauseProtection(pause) } label: {
+                                HStack(spacing: 6) {
+                                    Image(systemName: pause.isProtected ? "lock.fill" : "arrow.right")
+                                    Text(pause.isProtected
+                                         ? String(format: "Keep %.1fs", pause.originalDuration)
+                                         : String(format: "%.1fs → %.1fs", pause.originalDuration, model.pauseDuration))
+                                }
+                                .font(PoetTheme.utility(9, weight: .semibold))
+                                .foregroundStyle(pause.isProtected ? PoetTheme.muted : PoetTheme.sage)
+                                .padding(.horizontal, 10)
+                                .frame(height: 28)
+                                .background((pause.isProtected ? PoetTheme.elevated : PoetTheme.sageDark).opacity(0.95))
+                                .clipShape(Capsule())
                             }
-                            .font(PoetTheme.utility(9, weight: .semibold))
-                            .foregroundStyle(pause.isProtected ? PoetTheme.muted : PoetTheme.sage)
-                            .padding(.horizontal, 10)
-                            .frame(height: 28)
-                            .background((pause.isProtected ? PoetTheme.elevated : PoetTheme.sageDark).opacity(0.95))
-                            .clipShape(Capsule())
+                            .buttonStyle(.plain)
+                            .onHover { isHovering in
+                                highlightedPauseID = isHovering ? pause.id : nil
+                                onHighlight(isHovering ? pause : nil)
+                            }
+                            .help("\(pause.reason) · \(Int(pause.confidence * 100))% confidence. Click to \(pause.isProtected ? "compact" : "protect") this pause.")
                         }
-                        .buttonStyle(.plain)
-                        .onHover { isHovering in
-                            highlightedPauseID = isHovering ? pause.id : nil
-                            onHighlight(isHovering ? pause : nil)
-                        }
-                        .help("\(pause.reason) · \(Int(pause.confidence * 100))% confidence. Click to \(pause.isProtected ? "compact" : "protect") this pause.")
                     }
                 }
             }
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 10)
+        .fixedSize(horizontal: false, vertical: true)
     }
 }
 
@@ -518,30 +570,6 @@ private struct EditPreviewChoiceStyle: ButtonStyle {
             .background(selected ? PoetTheme.sage : Color.clear)
             .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
             .opacity(configuration.isPressed ? 0.8 : 1)
-    }
-}
-
-private struct WaveformScrubber: View {
-    @EnvironmentObject private var model: AppModel
-    private let levels: [CGFloat] = [0.22, 0.42, 0.76, 0.38, 0.58, 0.9, 0.52, 0.34, 0.68, 0.84, 0.46, 0.64, 0.3, 0.7, 0.48, 0.8, 0.38, 0.56, 0.88, 0.44, 0.62, 0.28, 0.72, 0.52, 0.82, 0.35, 0.58, 0.74, 0.42, 0.68, 0.32, 0.6]
-
-    var body: some View {
-        GeometryReader { geometry in
-            let progress = model.duration > 0 ? model.currentTime / model.duration : 0
-            HStack(spacing: 3) {
-                ForEach(Array(levels.enumerated()), id: \.offset) { index, level in
-                    Capsule()
-                        .fill(Double(index) / Double(levels.count) <= progress ? PoetTheme.sage : PoetTheme.faint.opacity(0.48))
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 5 + 28 * level)
-                }
-            }
-            .contentShape(Rectangle())
-            .gesture(DragGesture(minimumDistance: 0).onChanged { value in
-                let ratio = min(max(value.location.x / geometry.size.width, 0), 1)
-                model.seek(to: ratio * model.duration)
-            })
-        }
     }
 }
 
